@@ -18,12 +18,7 @@ from seifert_functions import (
     PACKAGE_ROOT,
     A_STAR,
     DEFAULT_BS_CACHE,
-    DEFAULT_CACHE,
     MeridianSolution,
-    STAGE1_P_ROOT_STEP_DEFAULT,
-    STAGE1_P_ROOT_STEP_MIN,
-    STAGE1_P_ROOT_X_TOL_DEFAULT,
-    C0_dimensional,
     V_at_area,
     _continue_report,
     _score_prolate_candidate,
@@ -32,20 +27,15 @@ from seifert_functions import (
     area_radius,
     bending_energy,
     c0_reduced,
-    find_stage1_p_root_from_right,
     integrate_appendix_b_stage2,
-    integrate_stage1_profile,
     integrate_stage25_pear_at_D,
     load_solution,
     load_solution_list,
     load_trajectory,
-    pear_branch_at_E_ok,
     reduced_volume_from_AV,
-    roots_from_scan,
     save_solution_at,
     save_solution_list,
     save_trajectory,
-    scan_p_bar,
     solve_seifert,
     solve_stage3_from_appendix_b,
 )
@@ -117,20 +107,6 @@ def two_sphere_alpha_from_v(v: float) -> Optional[float]:
         return None
 
 
-def two_sphere_u1_from_u0(U0: float, v: float) -> Optional[float]:
-    """South-pole curvature from north ``U₀`` in the thin-neck two-sphere limit."""
-    alpha = two_sphere_alpha_from_v(v)
-    if alpha is None or abs(U0) < 1e-14:
-        return None
-    v_lo = 2.0 ** -0.5
-    if v >= 1.0 - 1e-9 or alpha >= 1.0 - 1e-9:
-        return float(U0)
-    if abs(v - v_lo) < 1e-6 or abs(alpha - v_lo) < 1e-6:
-        return float(U0)
-    beta = float(np.sqrt(max(0.0, 1.0 - alpha * alpha)))
-    return float(U0) * beta / alpha
-
-
 def two_sphere_radii_from_v(v: float, R0: float = 1.0) -> Optional[Tuple[float, float]]:
     """``(R₁, R₂)`` for area ``4π R₀²`` and volume ``(4π/3) v R₀³`` (thin-neck limit)."""
     alpha = two_sphere_alpha_from_v(v)
@@ -166,29 +142,6 @@ def two_sphere_radii_from_AV(A: float, V: float) -> Optional[Tuple[float, float]
         r1, r2 = r2, r1
     return r1, r2
 
-
-def narrow_neck_limit_check(
-    U0: float,
-    U1: float,
-    v_bar: float,
-    area: float,
-) -> Dict[str, float]:
-    """Two-sphere limit residuals: ``Rᵢ = 1/Uᵢ``, ``R₁²+R₂²=R₀²``, ``R₁³+R₂³=v R₀³``."""
-    r0_sq = float(area) / A_STAR
-    r0 = float(np.sqrt(max(r0_sq, 0.0)))
-    inv0 = 1.0 / float(U0) if abs(U0) > 1e-14 else float("inf")
-    inv1 = 1.0 / float(U1) if abs(U1) > 1e-14 else float("inf")
-    cap_r_sq = inv0 * inv0 + inv1 * inv1
-    cap_r_cube = inv0 ** 3 + inv1 ** 3
-    v_r0_cube = float(v_bar) * r0 ** 3
-    return {
-        "cap_r_sq_sum": cap_r_sq,
-        "R0_sq": r0_sq,
-        "area_residual": cap_r_sq - r0_sq,
-        "area_residual_rel": (cap_r_sq - r0_sq) / max(r0_sq, 1e-12),
-        "volume_residual": cap_r_cube - v_r0_cube,
-        "volume_residual_rel": (cap_r_cube - v_r0_cube) / max(abs(v_r0_cube), 1e-12),
-    }
 
 def eta_bozic(
     T_d: float,
@@ -394,197 +347,6 @@ def bs_point_b_state(
         "eq9_lhs": float(sphere_stability_lhs(c0_B, eta)),
     }
 
-def bs_point_e_star_state(
-    C0: float,
-    *,
-    bump: float = 1e-3,
-    side: str = "pear",
-    c0_start: float = BS_C0_START,
-    T_d: float = 1.0,
-    eta: float = BS_ETA_MIN,
-    kappa: float = 1.0,
-    P_bar: Optional[float] = None,
-    sigma_bar: Optional[float] = None,
-) -> Dict[str, float]:
-    """ε-bumped seed at landmark **E** ≡ ``L_dumbbell`` (``τ = 1``, ``A = 2 A₀``).
-
-    The singular point is ``(v̄, c₀) = (2^{-1/2}, 2√2)``.  Two approaches:
-
-    * ``side="dumbbell"`` — from **below** in ``v̄`` (symmetric prolate-2 / E)::
-
-          U(0) = U(1) = C₀/2 + ε,
-          v̄ = 2^{-1/2} − ε,  c₀ = 2√2,  S₁ = 4π + ε
-
-    * ``side="pear"`` — from **above** in ``v̄`` (asymmetric pear)::
-
-          U(0) = C₀/2 + ε,  U(1) = C₀/2 − ε,
-          v̄ = 2^{-1/2} + ε,  c₀ = 2√2 − ε,  S₁ = 4π − ε
-
-    ``P̄`` / ``Σ̄`` default to the dumbbell shooting guesses
-    (:data:`BS_E_STAR_P_BAR`, :data:`BS_E_STAR_SIGMA_BAR`).
-    """
-    side_key = str(side).strip().lower()
-    if side_key in ("dumbbell", "below", "prolate-2", "prolate2", "l_dumbbell", "e"):
-        side_key = "dumbbell"
-    elif side_key in ("pear", "above", "asymmetric"):
-        side_key = "pear"
-    else:
-        raise ValueError(
-            f"side must be 'dumbbell'/'L_dumbbell' or 'pear' (got {side!r})"
-        )
-
-    eps = abs(float(bump))
-    ref = bs_point_a_ref(C0, c0_start=c0_start)
-    A_E = 2.0 * ref["A"]
-    U_eq = float(C0) / 2.0
-    if side_key == "dumbbell":
-        # E ≡ L_dumbbell, approached from below in v̄
-        v_E = BS_V_TWO_SPHERE - eps
-        c0_E = float(BS_C0_END)
-        U0 = U_eq + eps
-        U1 = U_eq + eps
-        S1 = float(A_STAR) + eps
-    else:
-        v_E = BS_V_TWO_SPHERE + eps
-        c0_E = BS_C0_END - eps
-        U0 = U_eq + eps
-        U1 = U_eq - eps
-        S1 = float(A_STAR) - eps
-    V_E = float(V_at_area(v_E, A_E))
-    R_E = float(area_radius(A_E))
-    L_p = float(L_p_from_eta(eta, T_d, abs(C0), kappa=kappa))
-    P_bar_v = float(BS_E_STAR_P_BAR if P_bar is None else P_bar)
-    sigma_bar_v = float(BS_E_STAR_SIGMA_BAR if sigma_bar is None else sigma_bar)
-    u1_ts = two_sphere_u1_from_u0(U0, max(v_E, BS_V_TWO_SPHERE))
-    return {
-        "c0": c0_E,
-        "v": v_E,
-        "R": R_E,
-        "tau": 1.0,
-        "t_growth": float(T_d),
-        "A": A_E,
-        "V": V_E,
-        "A_over_A0": 2.0,
-        "V_over_V0": float(V_E / ref["V"]),
-        "L_p": L_p,
-        "U0": U0,
-        "U1": U1,
-        "S1": S1,
-        "P_bar": P_bar_v,
-        "sigma_bar": sigma_bar_v,
-        "U1_two_sphere": float(u1_ts) if u1_ts is not None else float("nan"),
-        "bump": eps,
-        "side": side_key,
-        "C0_dimensional": float(C0),
-        "T_d": float(T_d),
-        "kappa": float(kappa),
-        "eta": float(eta),
-    }
-
-
-def bs_point_e_landmark_state(
-    C0: float,
-    *,
-    c0_start: float = BS_C0_START,
-    T_d: float = 1.0,
-    eta: float = BS_ETA_MIN,
-    kappa: float = 1.0,
-) -> Dict[str, float]:
-    """Landmark **E** at ``τ = 1``: two-sphere limit ``(v̄, c₀) = (2^{-1/2}, 2√2)``, ``A = 2A₀``."""
-    ref = bs_point_a_ref(C0, c0_start=c0_start)
-    A_E = 2.0 * ref["A"]
-    v_E = BS_V_TWO_SPHERE
-    c0_E = BS_C0_END
-    V_E = float(V_at_area(v_E, A_E))
-    R_E = float(area_radius(A_E))
-    L_p = float(L_p_from_eta(eta, T_d, abs(C0), kappa=kappa))
-    return {
-        "c0": c0_E,
-        "v": v_E,
-        "R": R_E,
-        "tau": 1.0,
-        "t_growth": float(T_d),
-        "A": A_E,
-        "V": V_E,
-        "A_over_A0": 2.0,
-        "V_over_V0": float(V_E / ref["V"]),
-        "L_p": L_p,
-        "C0_dimensional": float(C0),
-        "T_d": float(T_d),
-        "kappa": float(kappa),
-        "eta": float(eta),
-    }
-
-def shoot_e_star_two_sphere(
-    C0: float,
-    *,
-    bump: float = 1e-3,
-    side: str = "pear",
-    c0_start: float = BS_C0_START,
-    T_d: float = 1.0,
-    eta: float = BS_ETA_MIN,
-    kappa: float = 1.0,
-    P_bar: Optional[float] = None,
-    sigma_bar: Optional[float] = None,
-    prev: Optional[MeridianSolution] = None,
-    branch: Optional[str] = None,
-    verbose: bool = False,
-    u0_window: float = 2.5,
-    **shoot_kw,
-) -> MeridianSolution:
-    """Shoot landmark **E** ≡ ``L_dumbbell`` at ``A = 2 A₀``, ``τ = 1``.
-
-    ``side="dumbbell"`` (default approach from below): symmetric
-    ``U(0)=U(1)=C₀/2+ε``, ``v̄ = 2^{-1/2}−ε``.  ``side="pear"``: asymmetric
-    approach from above (``v̄ = 2^{-1/2}+ε``).
-    """
-    st = bs_point_e_star_state(
-        C0, bump=bump, side=side, c0_start=c0_start, T_d=T_d, eta=eta,
-        kappa=kappa, P_bar=P_bar, sigma_bar=sigma_bar,
-    )
-    side_key = str(st["side"])
-    if branch is None:
-        branch = "prolate-2" if side_key == "dumbbell" else "e_star"
-    A_E = float(st["A"])
-    v_E, c0_E = float(st["v"]), float(st["c0"])
-    shoot_kw = dict(shoot_kw)
-    n = int(shoot_kw.pop("n", 240))
-    if prev is not None and len(prev.s) > 0:
-        sol = solve_seifert(
-            v_E, c0_E, prev=prev, lock_branch=True, branch=branch,
-            verbose=verbose, use_u0_scan=False, pick="first",
-            A_target=A_E, A_c0=A_E, u0_window=u0_window, n=n, **shoot_kw,
-        )
-    else:
-        x0 = np.array([
-            st["U0"], st["U1"], st["S1"], st["sigma_bar"], st["P_bar"],
-        ], dtype=float)
-        sol = _shoot_two_leg(
-            v_E, c0_E, x0, branch=branch, n=n, verbose=verbose,
-            A_target=A_E, A_c0=A_E, u0_window=u0_window, **shoot_kw,
-        )
-    neck = narrow_neck_limit_check(sol.U0, sol.U1, sol.v, A_E)
-    sol.constraints.update({
-        "R0": float(st["R"]),
-        "A_phys": A_E,
-        "V_phys": float(st["V"]),
-        "v_ode": float(st["v"]),
-        "v_shoot": float(st["v"]),
-        "C0_dimensional": float(C0),
-        "DeltaP": float(sol.P_bar),
-        "t_growth": float(st["t_growth"]),
-        "dt_step": 0.0,
-        "L_p": float(st["L_p"]),
-        "T_d": float(T_d),
-        "eta": float(eta),
-        "kappa": float(kappa),
-        "phase": "shape",
-        "landmark": "E",
-        "e_star_bump": float(st["bump"]),
-        "e_star_side": side_key,
-        "narrow_neck": neck,
-    })
-    return sol
 
 def solve_bs_point_b(
     eta: float,
@@ -838,6 +600,23 @@ def pick_bs_d_target(
     return prolate[-1]
 
 
+def _tag_energy_D(
+    prol: MeridianSolution,
+    pear: MeridianSolution,
+    Ep: float,
+    Ee: float,
+) -> Tuple[MeridianSolution, MeridianSolution]:
+    """Stamp the bending-energy crossing metadata on the prolate/pear D frames."""
+    prol.constraints["phase"] = prol.constraints.get("phase", "shape")
+    prol.constraints["D_by"] = "bending_energy"
+    prol.constraints["E_prolate"] = Ep
+    prol.constraints["E_pear"] = Ee
+    pear.constraints["D_by"] = "bending_energy"
+    pear.constraints["E_prolate"] = Ep
+    pear.constraints["E_pear"] = Ee
+    return prol, pear
+
+
 def find_D_by_bending_energy(
     prolate_track: Sequence[MeridianSolution],
     pear_seed: MeridianSolution,
@@ -849,19 +628,35 @@ def find_D_by_bending_energy(
     verbose: bool = False,
     **stage3_kw: Any,
 ) -> Tuple[MeridianSolution, MeridianSolution, List[Dict[str, float]]]:
-    """First prolate frame (τ ≥ ``tau_start``) where pear bending energy is lower.
+    """Locate D at the prolate↔pear bending-energy crossing.
 
-    Walks a pear along the prolate ``(v̄, c₀, A)`` path via stage-3 matching.
-    Returns ``(D_prolate, pear_at_D, table)``.  Raises if no crossing is found.
+    ``tau_start`` is only a guideline for where to begin.  If the pear already
+    wins there, the scan walks *backward* (decreasing τ) one frame at a time
+    until the prolate wins again; D is then the lowest-τ frame where the pear is
+    still favorable (the transition).  If the prolate wins at ``tau_start`` the
+    scan walks forward as before.  Walks a pear along the prolate ``(v̄, c₀, A)``
+    path via stage-3 matching.  Returns ``(D_prolate, pear_at_D, table)``.
+    Raises if no crossing is found.
     """
     T_d = float(T_d)
-    t_lo = float(tau_start) * T_d
-    prolates = [
-        s for s in prolate_track
-        if s.success and len(s.s) > 0
-        and float(s.constraints.get("t_growth", -1.0)) >= t_lo - 1e-12
-    ]
+    prolates = sorted(
+        (
+            s for s in prolate_track
+            if s.success and len(s.s) > 0
+            and "t_growth" in s.constraints and "A_phys" in s.constraints
+        ),
+        key=lambda s: float(s.constraints["t_growth"]),
+    )
     if not prolates:
+        raise RuntimeError("no successful prolates for energy D search")
+
+    t_lo = float(tau_start) * T_d
+    start_idx = next(
+        (i for i, s in enumerate(prolates)
+         if float(s.constraints["t_growth"]) >= t_lo - 1e-12),
+        None,
+    )
+    if start_idx is None:
         raise RuntimeError(
             f"no successful prolates with τ ≥ {tau_start} for energy D search"
         )
@@ -874,67 +669,121 @@ def find_D_by_bending_energy(
     )
     kw.update(stage3_kw)
 
-    pear_cur = pear_seed
     table: List[Dict[str, float]] = []
-    for i, prol in enumerate(prolates):
+
+    def _match(
+        prol: MeridianSolution,
+        pear_from: MeridianSolution,
+        *,
+        first_hop: bool = False,
+    ) -> Optional[Tuple[MeridianSolution, float, float]]:
+        """Match a pear to *prol* warm-started from *pear_from*; log a table row."""
         A = float(prol.constraints["A_phys"])
-        # First station may be a longer (c₀,v̄) hop from the pear seed.
         local_kw = dict(kw)
-        if i == 0:
+        if first_hop:
+            # Longer (c₀,v̄) hop from the raw seed → allow more cv sub-steps.
             local_kw["min_cv_steps"] = max(int(local_kw.get("min_cv_steps", 5)), 10)
             local_kw["v_step"] = min(float(local_kw.get("v_step", 0.003)), 0.002)
         pear_try = solve_stage3_from_appendix_b(
-            pear_cur, float(prol.v), float(prol.c0), A_target=A, **local_kw,
+            pear_from, float(prol.v), float(prol.c0), A_target=A, **local_kw,
         )
+        tau = float(prol.constraints["t_growth"]) / T_d
         if not pear_try.success or len(pear_try.s) < 5:
             if verbose:
                 print(
-                    f"  energy-D: τ={float(prol.constraints['t_growth'])/T_d:.6f}  "
-                    f"pear match failed ({pear_try.message})",
+                    f"  energy-D: τ={tau:.6f}  pear match failed "
+                    f"({pear_try.message})",
                     flush=True,
                 )
-            continue
+            return None
         Ep = bending_energy(prol, kappa=kappa, C0=C0_dim)
         Ee = bending_energy(pear_try, kappa=kappa, C0=C0_dim)
-        tau = float(prol.constraints["t_growth"]) / T_d
-        row = {
-            "tau": tau,
-            "v": float(prol.v),
-            "c0": float(prol.c0),
-            "E_prolate": Ep,
-            "E_pear": Ee,
-            "dE": Ee - Ep,
-        }
-        table.append(row)
+        table.append({
+            "tau": tau, "v": float(prol.v), "c0": float(prol.c0),
+            "E_prolate": Ep, "E_pear": Ee, "dE": Ee - Ep,
+        })
         if verbose:
             print(
                 f"  energy-D: τ={tau:.6f}  E_prolate={Ep:.4f}  E_pear={Ee:.4f}  "
                 f"Δ={Ee - Ep:+.4f}",
                 flush=True,
             )
-        pear_cur = pear_try
-        if Ee < Ep:
-            prol.constraints["phase"] = prol.constraints.get("phase", "shape")
-            prol.constraints["D_by"] = "bending_energy"
-            prol.constraints["E_prolate"] = Ep
-            prol.constraints["E_pear"] = Ee
-            pear_try.constraints["D_by"] = "bending_energy"
-            pear_try.constraints["E_prolate"] = Ep
-            pear_try.constraints["E_pear"] = Ee
-            if verbose:
-                print(
-                    f"  energy-D: pear wins at τ={tau:.6f}  "
-                    f"(E_pear={Ee:.4f} < E_prolate={Ep:.4f})",
-                    flush=True,
-                )
-            return prol, pear_try, table
+        return pear_try, Ep, Ee
 
-    raise RuntimeError(
-        f"no prolate→pear bending-energy crossing for τ ≥ {tau_start} "
-        f"(last Δ={table[-1]['dE']:+.4f} at τ={table[-1]['tau']:.6f})"
-        if table else
-        f"no prolate→pear bending-energy crossing for τ ≥ {tau_start}"
-    )
+    # Evaluate the guideline frame first to pick a search direction.
+    start = _match(prolates[start_idx], pear_seed, first_hop=True)
+    if start is None:
+        raise RuntimeError(
+            f"pear match failed at guideline τ≈{tau_start} for energy D search"
+        )
+    pear_start, Ep0, Ee0 = start
+
+    if Ee0 >= Ep0:
+        # Prolate still wins at the guideline → march forward to the crossing.
+        pear_cur = pear_start
+        for prol in prolates[start_idx + 1:]:
+            res = _match(prol, pear_cur)
+            if res is None:
+                continue
+            pear_try, Ep, Ee = res
+            pear_cur = pear_try
+            if Ee < Ep:
+                tau = float(prol.constraints["t_growth"]) / T_d
+                if verbose:
+                    print(
+                        f"  energy-D: pear wins at τ={tau:.6f}  "
+                        f"(E_pear={Ee:.4f} < E_prolate={Ep:.4f})",
+                        flush=True,
+                    )
+                D_prol, pear_D = _tag_energy_D(prol, pear_try, Ep, Ee)
+                return D_prol, pear_D, table
+        raise RuntimeError(
+            f"no prolate→pear bending-energy crossing for τ ≥ {tau_start} "
+            f"(last Δ={table[-1]['dE']:+.4f} at τ={table[-1]['tau']:.6f})"
+            if table else
+            f"no prolate→pear bending-energy crossing for τ ≥ {tau_start}"
+        )
+
+    # Pear already wins at the guideline → walk backward to find the transition.
+    best = (prolates[start_idx], pear_start, Ep0, Ee0)
+    pear_cur = pear_start
+    for prol in reversed(prolates[:start_idx]):
+        res = _match(prol, pear_cur)
+        if res is None:
+            break
+        pear_try, Ep, Ee = res
+        if Ee < Ep:
+            best = (prol, pear_try, Ep, Ee)
+            pear_cur = pear_try
+            continue
+        tau = float(prol.constraints["t_growth"]) / T_d
+        best_tau = float(best[0].constraints["t_growth"]) / T_d
+        if verbose:
+            print(
+                f"  energy-D: transition bracketed — prolate wins at τ={tau:.6f}, "
+                f"pear wins at τ={best_tau:.6f}",
+                flush=True,
+            )
+        break
+    else:
+        if verbose and start_idx > 0:
+            best_tau = float(best[0].constraints["t_growth"]) / T_d
+            print(
+                f"  energy-D: pear favored down to the earliest prolate; "
+                f"D pinned at τ={best_tau:.6f}",
+                flush=True,
+            )
+
+    D_prol, pear_at_D, Ep_D, Ee_D = best
+    if verbose:
+        tau_D = float(D_prol.constraints["t_growth"]) / T_d
+        print(
+            f"  energy-D: pear wins at τ={tau_D:.6f}  "
+            f"(E_pear={Ee_D:.4f} < E_prolate={Ep_D:.4f})",
+            flush=True,
+        )
+    D_prol, pear_at_D = _tag_energy_D(D_prol, pear_at_D, Ep_D, Ee_D)
+    return D_prol, pear_at_D, table
 
 
 def bs_continue_max_iter(n_steps: int, tau_remain: float, dt_nom: float) -> int:
@@ -1443,208 +1292,6 @@ def continue_bozic_svetina(
 
     return out
 
-def continue_bozic_svetina_backward(
-    prev: MeridianSolution,
-    *,
-    eta: Optional[float] = None,
-    T_d: float = 1.0,
-    kappa: float = 1.0,
-    alpha: Optional[float] = None,
-    L_p: Optional[float] = None,
-    dt: Optional[float] = None,
-    n_steps: Optional[int] = None,
-    t_stop: Optional[float] = None,
-    C0_dim: Optional[float] = None,
-    max_dv: float = 0.01,
-    u0_window: float = 0.5,
-    lock_branch_steps: Optional[int] = None,
-    u0_window_late: Optional[float] = None,
-    branch: str = "seifert",
-    verbose: bool = False,
-    progress: bool = True,
-) -> List[MeridianSolution]:
-    """Reverse Božič–Svetina growth from **E** toward earlier ``τ`` (area deflation).
-
-    At each snapshot the shape is shot at the current ``(A, V)``; then area and
-    volume are stepped backward with ``dA/dt = −α A``, ``dV/dt = −L_p A ΔP``.
-    """
-    if prev is None or not prev.success:
-        raise ValueError("continue_bozic_svetina_backward requires a successful prev solution")
-
-    C0_fixed = float(
-        C0_dim
-        if C0_dim is not None
-        else prev.constraints.get("C0_dimensional", prev.c0)
-    )
-    if C0_fixed == 0.0 and eta is not None:
-        raise ValueError("eta-based L_p requires C0 ≠ 0; pass L_p explicitly for C0=0")
-
-    if alpha is None:
-        alpha = alpha_from_T_d(T_d)
-    else:
-        T_d = float(np.log(2.0) / alpha)
-
-    if L_p is None:
-        if eta is None:
-            eta = float(prev.constraints.get("eta", BS_ETA_MIN))
-        L_p = L_p_from_eta(eta, T_d, abs(C0_fixed), kappa=kappa)
-    else:
-        eta = eta_bozic(T_d, L_p, abs(C0_fixed), kappa=kappa)
-
-    if alpha <= 0.0 or L_p < 0.0:
-        raise ValueError("alpha must be positive and L_p non-negative")
-
-    t_growth = float(prev.constraints.get("t_growth", T_d))
-    if t_stop is None:
-        t_stop = float(BS_TAU_D_REF * T_d)
-    dt_nom, n_steps_eff = _resolve_bs_dt(T_d=T_d, dt=dt, n_steps=n_steps)
-    tau_remain = max(t_growth - float(t_stop), 0.0)
-    n_expect = bs_continue_n_expect(tau_remain, dt_nom)
-    max_iter = bs_continue_max_iter(n_steps_eff, tau_remain, dt_nom)
-
-    out: List[MeridianSolution] = [prev]
-    warm: Optional[MeridianSolution] = prev
-    A_phys = float(prev.constraints.get("A_phys", A_STAR))
-    V_phys = float(prev.constraints.get("V_phys", V_at_area(prev.v, A_phys)))
-
-    if progress or verbose:
-        print(
-            f"continue_bozic_svetina_backward: η={eta:.4g}, C₀={C0_fixed:.4g}, "
-            f"T_d={T_d:.4g}, L_p={L_p:.4g}, α={alpha:.4g}, "
-            f"dt_nom={dt_nom:.4g}, ≈{n_expect} snaps, t∈[{t_stop:.4g},{t_growth:.4g}], "
-            f"τ_stop={t_stop / T_d:.4g}",
-            flush=True,
-        )
-
-    def _shoot_shape(
-        v_tgt: float,
-        c0_tgt: float,
-        warm_sol: Optional[MeridianSolution],
-        *,
-        A_target: float,
-        shape_shoot_idx: int = 0,
-    ) -> MeridianSolution:
-        if lock_branch_steps is None:
-            lock = warm_sol is not None
-        else:
-            lock = warm_sol is not None and shape_shoot_idx < int(lock_branch_steps)
-        window = u0_window
-        if not lock and u0_window_late is not None:
-            window = float(u0_window_late)
-        elif not lock:
-            window = max(float(u0_window), 1.5)
-        return solve_seifert(
-            v_tgt, c0_tgt,
-            prev=warm_sol,
-            branch=branch,
-            verbose=verbose,
-            use_u0_scan=False,
-            pick="first",
-            lock_branch=(lock and warm_sol is not None),
-            u0_window=window,
-            A_target=float(A_target),
-            A_c0=float(A_target),
-        )
-
-    i = 0
-    shape_shoot_idx = 0
-    while i < max_iter:
-        if t_growth <= t_stop + 1e-15:
-            break
-
-        P_flux = float(warm.P_bar if warm is not None else prev.P_bar)
-        dt = min(dt_nom, t_growth - t_stop)
-        v_step = float(reduced_volume_from_AV(A_phys, V_phys))
-        for _ in range(24):
-            A_trial = float(A_phys * np.exp(-alpha * dt))
-            V_trial = float(V_phys - L_p * A_phys * P_flux * dt)
-            if V_trial <= 0.0:
-                dt *= 0.5
-                continue
-            v_trial = float(reduced_volume_from_AV(A_trial, V_trial))
-            if abs(v_trial - v_step) <= max_dv:
-                break
-            dt *= 0.5
-        else:
-            if progress or verbose:
-                A_trial = float(A_phys * np.exp(-alpha * dt))
-                V_trial = float(V_phys - L_p * A_phys * P_flux * dt)
-                v_trial = float(reduced_volume_from_AV(A_trial, V_trial))
-                print(
-                    f"  [{i + 1}] backward path stopped "
-                    f"(could not keep |Δv̄| ≤ {max_dv}; "
-                    f"v̄={v_step:.5f}→{v_trial:.5f}, dt={dt:.2e})",
-                    flush=True,
-                )
-            break
-
-        A_before = float(A_phys)
-        A_phys = float(A_before * np.exp(-alpha * dt))
-        V_phys = float(V_phys - L_p * A_before * P_flux * dt)
-        t_growth -= dt
-
-        t0 = time.perf_counter()
-        R0 = float(np.sqrt(A_phys / A_STAR))
-        c0_red = c0_reduced(C0_fixed, A_phys)
-        v_now = float(reduced_volume_from_AV(A_phys, V_phys))
-        v_shoot = float(max(v_now, 0.05))
-
-        if verbose or progress:
-            print(
-                f"  shooting v̄={v_shoot:.4f} c₀={c0_red:.4f} "
-                f"(R₀={R0:.4f}, τ={t_growth / T_d:.4f})  [backward]",
-                flush=True,
-            )
-        sol = _shoot_shape(
-            v_shoot, c0_red, warm, A_target=A_phys, shape_shoot_idx=shape_shoot_idx,
-        )
-        shape_shoot_idx += 1
-
-        sol.constraints.update({
-            "R0": R0,
-            "A_phys": float(A_phys),
-            "V_phys": float(V_phys),
-            "v_ode": float(v_now),
-            "v_shoot": float(v_shoot),
-            "C0_dimensional": C0_fixed,
-            "DeltaP": float(sol.P_bar),
-            "P_dimensional": growth_pressure_from_shoot(sol, R0, kappa=kappa),
-            "P_bar_seifert": float(sol.P_bar),
-            "t_growth": float(t_growth),
-            "dt_step": float(dt),
-            "dt_nom": float(dt_nom),
-            "alpha": float(alpha),
-            "L_p": float(L_p),
-            "T_d": float(T_d),
-            "eta": float(eta),
-            "phase": "shape",
-            "kappa": float(kappa),
-            "growth_direction": "backward",
-        })
-
-        dt_wall = time.perf_counter() - t0
-        out.append(sol)
-        if progress or verbose:
-            _continue_report(i, n_expect, sol, "bwd" if sol.success else "FAIL", dt_wall)
-
-        if not sol.success:
-            if progress or verbose:
-                print(f"  [{i + 1}] backward path stopped (solve failed)", flush=True)
-            break
-
-        warm = sol
-        i += 1
-
-    if i >= max_iter and t_growth > t_stop + 1e-12 and out and out[-1].success:
-        if progress or verbose:
-            print(
-                f"  stopped at iteration cap ({len(out)} snapshots, "
-                f"τ={t_growth / T_d:.4g}, target τ={t_stop / T_d:.4g})",
-                flush=True,
-            )
-
-    return out
-
 @dataclass
 class BSLandmarks:
     """Landmarks on a Božič–Svetina growth trajectory."""
@@ -1750,7 +1397,6 @@ def detect_bs_landmarks(
     if lm.D is None:
         lm.D = pick_bs_d_target(ok, lm, T_d=T_d)
     return lm
-
 
 
 # ===== Workflow I/O =====
@@ -1906,7 +1552,6 @@ def load_bs_workflow(
 # ===== Workflow steps =====
 
 
-
 # --- paths & defaults -------------------------------------------------------
 
 RESULTS = PACKAGE_ROOT / "results"
@@ -1929,47 +1574,11 @@ def results_dir(eta: float, base: Optional[Path] = None) -> Path:
     return d
 
 
-def _workflow_exists(d: Path) -> bool:
-    return _manifest_path(d).exists()
-
-
-def resolve_pear_cache(
-    cache: Path,
-    *,
-    T_d: float = 1.0,
-    pear_cache: Optional[Path] = None,
-) -> Path:
-    """Return directory used for optional pear stage caches.
-
-    The Appendix-B warm start itself lives at ``pear_appendix_b_seed.json``
-    in this package (see ``load_pear_appendix_b_seed``).  Runtime stage-2.5/3
-    artifacts may still be written under ``cache``.
-    """
-    if pear_cache is not None:
-        return Path(pear_cache)
-    return Path(cache)
-
-
 def _targets_match_D(sol: MeridianSolution, D: MeridianSolution, *, rtol: float = 5e-3) -> bool:
     return (
         abs(float(sol.v) - float(D.v)) < rtol
         and abs(float(sol.c0) - float(D.c0)) < rtol * max(abs(float(D.c0)), 1.0)
     )
-
-
-def _targets_match_E(sol: MeridianSolution, *, rtol: float = 5e-3) -> bool:
-    return pear_branch_at_E_ok(sol, rtol=rtol)
-
-
-def _load_d_target(cache: Path, *, T_d: float = 1.0) -> MeridianSolution:
-    track, lm = load_prolate_track(cache)
-    if track is None or lm is None:
-        raise FileNotFoundError(
-            f"No cached prolate B→D track under {cache}; run step 2 first."
-        )
-    if lm.D is not None:
-        return lm.D
-    return pick_bs_d_target(_ok(track), lm, T_d=T_d)
 
 
 def _stage25_matches_D(stage25: MeridianSolution, D: MeridianSolution, *, rtol: float = 1e-3) -> bool:
@@ -2005,13 +1614,6 @@ def _load_track(d: Path, key: str) -> Optional[List[MeridianSolution]]:
         return None
     path = d / rel
     return load_trajectory(path) if path.exists() else None
-
-
-def _normalize_seed_from(seed_from: str) -> str:
-    s = str(seed_from).lower()
-    if s not in ("from_d", "from_pear"):
-        raise ValueError(f"seed_from must be 'from_D' or 'from_pear', got {seed_from!r}")
-    return s
 
 
 def _save_track(
@@ -2060,27 +1662,8 @@ def load_full_track(d: Path) -> Optional[List[MeridianSolution]]:
     return _load_track(d, "full_track")
 
 
-def load_backward_track(d: Path) -> Optional[List[MeridianSolution]]:
-    return _load_track(d, "backward_from_E_track")
-
-
 def save_full_track(d: Path, track: Sequence[MeridianSolution]) -> None:
     _save_track(d, "full_track", track, name="full_track")
-
-
-def save_backward_track(
-    d: Path,
-    track: Sequence[MeridianSolution],
-    *,
-    seed_from: Optional[str] = None,
-) -> None:
-    extra = None
-    if seed_from is not None:
-        extra = {"backward_from_E_seed": _normalize_seed_from(seed_from)}
-    _save_track(
-        d, "backward_from_E_track", track, name="backward_from_E_track",
-        manifest_extra=extra,
-    )
 
 
 def splice_at_D(
@@ -2320,145 +1903,6 @@ def step3_pear_at_D(
     return pear_at_D
 
 
-def resolve_pear_warm_for_E(
-    *,
-    cache: Path,
-    seed_from: str = "from_pear",
-    pear_cache: Optional[Path] = None,
-    T_d: float = 1.0,
-    C0: float = 1.0,
-    use_cache: bool = True,
-    verbose: bool = False,
-) -> MeridianSolution:
-    """Pear warm start for a straight-line shoot to **E**.
-
-    ``seed_from="from_pear"`` (default) — stage-2.5 pear rescaled to ``A_D``
-    (the original asymmetric pear seed, before the D ``(c₀,v̄)`` match).
-    ``seed_from="from_D"`` — stage-3 pear already matched at landmark **D**.
-    """
-    seed_from = _normalize_seed_from(seed_from)
-
-    if seed_from == "from_d":
-        D = _load_d_target(cache, T_d=T_d)
-        return step3_pear_at_D(
-            D, cache=cache, pear_cache=pear_cache, T_d=T_d, C0=C0,
-            use_cache=use_cache, verbose=verbose,
-        )
-
-    try:
-        pwf = load_bs_workflow(cache)
-    except FileNotFoundError:
-        pwf = {}
-    D = _load_d_target(cache, T_d=T_d)
-
-    pear25 = pwf.get("stage25") if use_cache else None
-    if not (pear25 is not None and _stage25_matches_D(pear25, D)):
-        seed = load_pear_appendix_b_seed()
-        if verbose:
-            print(f"  pear seed ← {resolve_pear_seed_path().name} → rescale @ D", flush=True)
-        pear25 = integrate_stage25_pear_at_D(seed, D, C0=C0, verbose=verbose)
-        if use_cache:
-            save_bs_workflow(cache, stage25=pear25)
-    return pear25
-
-
-def step_pear_at_E(
-    warm: MeridianSolution,
-    *,
-    C0: float,
-    eta: float,
-    T_d: float = 1.0,
-    kappa: float = 1.0,
-    cache: Optional[Path] = None,
-    seed_from: str = "from_pear",
-    use_cache: bool = True,
-    verbose: bool = False,
-) -> Tuple[MeridianSolution, Dict[str, float]]:
-    """Straight-line ``(c₀, v̄)`` shoot from a pear warm start to landmark **E**."""
-    seed_key = _normalize_seed_from(seed_from)
-    st_E = bs_point_e_landmark_state(C0, T_d=T_d, eta=eta, kappa=kappa)
-    A_E = float(st_E["A"])
-
-    pear_at_E: Optional[MeridianSolution] = None
-    if use_cache and cache is not None:
-        try:
-            pwf = load_bs_workflow(cache)
-            manifest = pwf.get("manifest", {})
-            cached_seed = manifest.get("pear_stage4_seed")
-            pear_at_E = pwf.get("stage4")
-            if pear_at_E is not None and cached_seed != seed_key:
-                if verbose:
-                    print(
-                        f"  pear→E: ignore cached stage4 "
-                        f"(seed {cached_seed!r} ≠ {seed_key!r})",
-                        flush=True,
-                    )
-                pear_at_E = None
-        except FileNotFoundError:
-            pear_at_E = None
-        if pear_at_E is not None and not _targets_match_E(pear_at_E):
-            pear_at_E = None
-
-    if pear_at_E is None:
-        if verbose:
-            print(
-                f"  pear→E ({seed_key}): A_E={A_E:.4f}  warm v̄={warm.v:.4f} c₀={warm.c0:.4f}  "
-                f"→ v̄={BS_V_TWO_SPHERE:.4f} c₀={BS_C0_END:.4f}",
-                flush=True,
-            )
-        pear_at_E = solve_stage3_from_appendix_b(
-            warm, float(BS_V_TWO_SPHERE), float(BS_C0_END),
-            A_target=A_E,
-            branch="stage4",
-            u0_window=0.35,
-            v_step=0.001,
-            c0_step=0.012,
-            min_cv_steps=90,
-            strict_pear_branch=True,
-            pear_min_asym=0.08,
-            junction_match_tol=0.05,
-            s1_max_rel_jump=0.03,
-            cv_bisect_max=6,
-            verbose=verbose,
-        )
-        if use_cache and cache is not None:
-            save_bs_workflow(cache, stage4=pear_at_E)
-            wf = _read_manifest(cache)
-            wf["pear_stage4_seed"] = seed_key
-            _write_manifest(cache, wf)
-
-    if not pear_at_E.success:
-        raise RuntimeError("pear stage-4 match at E failed")
-    return pear_at_E, st_E
-
-
-def _pear_seed_at_E(
-    pear_at_E: MeridianSolution,
-    st_E: Dict[str, float],
-    *,
-    C0: float,
-    eta: float,
-    T_d: float,
-    kappa: float,
-) -> MeridianSolution:
-    seed = pear_at_E.copy()
-    seed.constraints.update({
-        "R0": float(st_E["R"]),
-        "A_phys": float(st_E["A"]),
-        "V_phys": float(st_E["V"]),
-        "C0_dimensional": C0,
-        "DeltaP": float(pear_at_E.P_bar),
-        "t_growth": float(T_d),
-        "eta": eta,
-        "T_d": T_d,
-        "L_p": float(st_E["L_p"]),
-        "kappa": kappa,
-        "phase": "shape",
-        "landmark": "E",
-    })
-    return seed
-
-
 def _pear_seed_at_D(
     pear_at_D: MeridianSolution,
     D: MeridianSolution,
@@ -2535,511 +1979,6 @@ def step4_pear_to_E(
     return past_ok
 
 
-def scan_e_star_stage1(
-    C0: float,
-    *,
-    bump: float = 1e-3,
-    side: str = "pear",
-    P_bar_guess: float = BS_E_STAR_P_BAR,
-    sigma_bar: float = BS_E_STAR_SIGMA_BAR,
-    p_min: float = -1.0,
-    p_max: float = 0.15,
-    n_points: int = 101,
-    n_s1: int = 1,
-    workers: Optional[int] = None,
-    timeout: float = 2.0,
-    verbose: bool = False,
-) -> Dict[str, Any]:
-    """Stage-1 ``P̄`` scan at fixed E* ``(U(0), Σ̄, C₀)`` for the two-sphere root.
-
-    At the ε-bumped two-sphere endpoint ``U(0)`` and ``Σ̄`` are fixed; ``P̄`` is
-    scanned and ``X(S₁^{(n)})`` is recorded (Seifert stage-1 style).  Roots with
-    ``X(S₁)=0`` identify the junction pressure for the dumbbell branch.
-    """
-    st = bs_point_e_star_state(C0, bump=bump, side=side)
-    U0 = float(st["U0"])
-    P_grid = np.linspace(float(p_min), float(p_max), int(n_points))
-    if verbose:
-        print(
-            f"E* stage-1 scan: C₀={C0:g}  U(0)={U0:.4f}  Σ̄={sigma_bar:.4f}  "
-            f"n={n_s1}  P̄∈[{p_min},{p_max}]  (guess P̄={P_bar_guess:.4f})",
-            flush=True,
-        )
-    p_vals, xs, us, s1 = scan_p_bar(
-        C0, U0, P_grid, sigma_bar=sigma_bar, n=n_s1,
-        timeout=timeout, workers=workers, verbose=verbose,
-    )
-    roots = roots_from_scan(p_vals, xs, us, s1)
-    if verbose:
-        print(f"  stage-1 roots (X→0): {len(roots)}")
-        for k, (p_r, u1, s1_r) in enumerate(roots):
-            print(
-                f"    [{k}] P̄={p_r:+.5f}  U₁={u1:+.5f}  S₁={s1_r:.4f}",
-                flush=True,
-            )
-    return {
-        "P_bar": p_vals,
-        "X_south": xs,
-        "U_south": us,
-        "S1_hit": s1,
-        "roots": roots,
-        "P_bar_guess": float(P_bar_guess),
-        "sigma_bar": float(sigma_bar),
-        "U0_fixed": U0,
-        "e_star": st,
-        "p_min": float(p_min),
-        "p_max": float(p_max),
-        "n_s1": int(n_s1),
-        "C0_scan": float(C0),
-        "scan_axis": "P_bar",
-    }
-
-
-def sided_search_e_star_p(
-    C0: float,
-    *,
-    bump: float = 1e-3,
-    side: str = "pear",
-    sigma_bar: float = BS_E_STAR_SIGMA_BAR,
-    p_start: float,
-    step: float = STAGE1_P_ROOT_STEP_DEFAULT,
-    step_min: float = STAGE1_P_ROOT_STEP_MIN,
-    x_tol: float = STAGE1_P_ROOT_X_TOL_DEFAULT,
-    n_s1: int = 1,
-    verbose: bool = False,
-) -> Dict[str, Any]:
-    """Sided stage-1 search in ``P̄`` from the right (``X>0``) toward ``X(S₁)=0``."""
-    st = bs_point_e_star_state(C0, bump=bump, side=side, sigma_bar=sigma_bar)
-    U0 = float(st["U0"])
-    history: List[Tuple[float, float]] = []
-    if verbose:
-        print(
-            f"Sided P̄ search from P̄={p_start:.6g}  U(0)={U0:.4f}  Σ̄={sigma_bar:.4f}  "
-            f"step={step:g}  min_step={step_min:g}  |X| tol={x_tol:g}",
-            flush=True,
-        )
-    root = find_stage1_p_root_from_right(
-        float(p_start), U0=U0, c0=C0, sigma_bar=sigma_bar, n_s1=n_s1,
-        step=float(step), step_min=float(step_min), x_tol=float(x_tol),
-        verbose=verbose, history=history,
-    )
-    if verbose and root is not None:
-        p_r, u1, s1_r = root
-        print(
-            f"  sided root: P̄={p_r:+.6f}  U₁={u1:+.6f}  S₁={s1_r:.4f}  "
-            f"({len(history)} trials)",
-            flush=True,
-        )
-    return {
-        "root": root,
-        "history": history,
-        "U0_fixed": U0,
-        "sigma_bar": float(sigma_bar),
-        "p_start": float(p_start),
-        "e_star": st,
-    }
-
-
-def save_e_star_stage1_root_shape(
-    sided: Dict[str, Any],
-    *,
-    C0: float,
-    out_dir: Path,
-    eta: float,
-    bump: float = 1e-3,
-) -> Optional[Path]:
-    """Plot the stage-1 north-leg meridian at the sided ``P̄`` root (``X(S₁)≈0``)."""
-    import matplotlib.pyplot as plt
-
-    root = sided.get("root")
-    if root is None:
-        return None
-    p_root, u1_root, s1_hit = root
-    st = sided.get("e_star") or bs_point_e_star_state(C0, bump=bump)
-    U0 = float(sided.get("U0_fixed", st["U0"]))
-    sigma_bar = float(sided.get("sigma_bar", BS_E_STAR_SIGMA_BAR))
-    n_s1 = int(sided.get("n_s1", 1))
-
-    trial = integrate_stage1_profile(
-        U0, c0=C0, P_bar=float(p_root), sigma_bar=sigma_bar,
-        n=280, n_s1=n_s1, S_max=max(120.0, 1.1 * float(s1_hit)),
-    )
-    if trial is None:
-        print("  stage-1 root shape: integration failed", flush=True)
-        return None
-    _S, X, Z, y_end = trial
-    x_s1 = float(y_end[0])
-
-    fig, ax = plt.subplots(figsize=(4.8, 5.8))
-    ax.plot(X, -Z, lw=2.2, color="C0")
-    ax.plot([float(X[-1])], [-float(Z[-1])], "o", ms=7, color="C3", label=rf"$S_1$ hit")
-    ax.axhline(0.0, color="k", lw=0.5, alpha=0.35)
-    ax.set_aspect("equal")
-    ax.set_xlabel(r"$X$")
-    ax.set_ylabel(r"$-Z$")
-    ax.set_title(
-        rf"Stage-1 root ($\eta={eta:g}$)" + "\n"
-        rf"$\bar P={p_root:.5f}$  $U(0)={U0:.4f}$  $\bar\Sigma={sigma_bar:.4f}$" + "\n"
-        rf"$X(S_1)={x_s1:+.4f}$  $U(S_1)={u1_root:.4f}$  $S_1={s1_hit:.3f}$"
-    )
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(True, alpha=0.25)
-    fig.tight_layout()
-    out_path = Path(out_dir) / "e_star_stage1_root_shape.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"  stage-1 root shape → {out_path}", flush=True)
-    return out_path
-
-
-def save_e_star_stage1_plot(
-    scan: Dict[str, Any],
-    *,
-    e_sol: Optional[MeridianSolution] = None,
-    out_dir: Path,
-    eta: float,
-    C0: Optional[float] = None,
-    bump: float = 1e-3,
-) -> Path:
-    """Three-panel stage-1 figure (notebook style): grid, sided search, root shape."""
-    import matplotlib.pyplot as plt
-
-    p = np.asarray(scan["P_bar"], dtype=float)
-    xs = np.asarray(scan["X_south"], dtype=float)
-    st = scan["e_star"]
-    C0_scan = float(C0 if C0 is not None else scan.get("C0_scan", 1.0))
-    roots: List[Tuple[float, float, float]] = list(scan.get("roots", []))
-    sided_root = scan.get("sided_root")
-    sided_history: List[Tuple[float, float]] = list(scan.get("sided_history", []))
-    sided_step = float(scan.get("sided_step", STAGE1_P_ROOT_STEP_DEFAULT))
-    p_guess = float(scan.get("P_bar_guess", st.get("P_bar", BS_E_STAR_P_BAR)))
-    sigma_bar = float(scan.get("sigma_bar", BS_E_STAR_SIGMA_BAR))
-    U0 = float(scan.get("U0_fixed", st["U0"]))
-    n_s1 = int(scan.get("n_s1", 1))
-    valid = np.isfinite(xs)
-
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.3))
-
-    # --- panel 0: coarse grid scan ---
-    ax = axes[0]
-    ax.plot(p[valid], xs[valid], ".-", ms=3, lw=1.1, color="C0", label=rf"$n={n_s1}$")
-    ax.axhline(0.0, color="k", lw=0.8, alpha=0.4)
-    ax.axvline(p_guess, color="C2", ls="--", lw=0.9, alpha=0.8, label=r"E* $\bar P$ guess")
-    if sided_root is not None:
-        p_sr, _, _ = sided_root
-        ax.axvline(float(p_sr), color="C3", ls="--", lw=0.9, alpha=0.85, label="sided root")
-    for k, (p_r, _, _) in enumerate(roots):
-        if sided_root is not None and abs(p_r - sided_root[0]) < 1e-4:
-            continue
-        ax.axvline(p_r, color="C3", ls=":", lw=0.9, alpha=0.7, label="grid root" if k == 0 else None)
-    ax.set_xlabel(r"$\bar P$")
-    ax.set_ylabel(r"$X(S_1^{(n)})$")
-    ax.set_xlim(float(scan["p_min"]), float(scan["p_max"]))
-    ax.set_title(rf"Grid scan ($C_0={C0_scan:g}$, $\eta={eta:g}$)")
-    ax.legend(fontsize=7, loc="upper right")
-    ax.grid(True, alpha=0.3)
-
-    # --- panel 1: sided search trail (zoom) ---
-    ax = axes[1]
-    ax.plot(p[valid], xs[valid], ".", ms=4, color="0.75", label="grid scan")
-    if sided_history:
-        sh_p = np.array([t[0] for t in sided_history], dtype=float)
-        sh_x = np.array([t[1] for t in sided_history], dtype=float)
-        ax.plot(sh_p, sh_x, "o-", ms=4, lw=1.3, color="C1", label="sided search", zorder=3)
-        ax.plot(sh_p[0], sh_x[0], ">", ms=9, color="C1", label="start", zorder=4)
-        ax.plot(sh_p[-1], sh_x[-1], "*", ms=13, color="C3", label="sided root", zorder=4)
-        n_hist = len(sided_history)
-        label_stride = max(1, n_hist // 8)
-        for i, (pi, xi) in enumerate(sided_history):
-            if i % label_stride == 0 or i == n_hist - 1:
-                ax.annotate(
-                    str(i), (pi, xi), textcoords="offset points", xytext=(4, 4),
-                    fontsize=7, color="C1", alpha=0.9,
-                )
-        pad = max(5.0 * abs(sided_step), 0.25 * (float(sh_p.max()) - float(sh_p.min())), 0.03)
-        ax.set_xlim(float(sh_p.min()) - pad, float(sh_p.max()) + 0.25 * pad)
-    ax.axhline(0.0, color="k", lw=0.8, alpha=0.4)
-    if sided_root is not None:
-        p_sr, _, _ = sided_root
-        ax.axvline(float(p_sr), color="C3", ls="--", lw=0.9, alpha=0.8)
-    ax.set_xlabel(r"$\bar P$")
-    ax.set_ylabel(r"$X(S_1^{(n)})$")
-    ax.set_title("Sided search (zoom)")
-    ax.legend(fontsize=7, loc="upper right")
-    ax.grid(True, alpha=0.3)
-
-    # --- panel 2: trial meridian at sided root ---
-    ax = axes[2]
-    n_plotted = 0
-    if sided_root is not None:
-        p_root, _u1, s1_hit = sided_root
-        trial = integrate_stage1_profile(
-            U0, c0=C0_scan, P_bar=float(p_root), sigma_bar=sigma_bar,
-            n=240, n_s1=n_s1, S_max=max(120.0, 1.1 * float(s1_hit)),
-        )
-        if trial is not None:
-            _S, X, Z, y_end = trial
-            ax.plot(X, -Z, lw=1.6, color="C0", label=rf"$\bar P={p_root:.4f}$")
-            ax.plot([float(X[-1])], [-float(Z[-1])], "o", ms=6, color="C3")
-            n_plotted = 1
-            ax.set_title(
-                rf"Root contour  $X(S_1)={float(y_end[0]):+.4f}$",
-                fontsize=9,
-            )
-        else:
-            ax.set_title("Root contour (integrate failed)")
-    else:
-        ax.set_title("Root contour (no sided root)")
-    ax.set_aspect("equal")
-    ax.set_xlabel(r"$X$")
-    ax.set_ylabel(r"$-Z$")
-    if n_plotted:
-        ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.25)
-
-    fig.tight_layout()
-    out_path = Path(out_dir) / "e_star_stage1_scan.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    return out_path
-
-
-def save_e_star_sided_progression_plot(
-    scan: Dict[str, Any],
-    *,
-    out_dir: Path,
-    eta: float,
-) -> Optional[Path]:
-    """Dedicated sided-search progression: ``P̄`` vs ``X`` and ``|X|`` vs step index."""
-    import matplotlib.pyplot as plt
-
-    sided_history: List[Tuple[float, float]] = list(scan.get("sided_history", []))
-    if len(sided_history) < 2:
-        return None
-    sided_root = scan.get("sided_root")
-    sided_step = float(scan.get("sided_step", STAGE1_P_ROOT_STEP_DEFAULT))
-    p = np.asarray(scan["P_bar"], dtype=float)
-    xs = np.asarray(scan["X_south"], dtype=float)
-    valid = np.isfinite(xs)
-
-    sh_p = np.array([t[0] for t in sided_history], dtype=float)
-    sh_x = np.array([t[1] for t in sided_history], dtype=float)
-    steps = np.arange(len(sided_history))
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-
-    ax = axes[0]
-    ax.plot(p[valid], xs[valid], ".", ms=4, color="0.8", label="grid scan", zorder=1)
-    ax.plot(sh_p, sh_x, "o-", ms=5, lw=1.4, color="C1", label="sided search", zorder=3)
-    ax.plot(sh_p[0], sh_x[0], ">", ms=10, color="C1", zorder=4)
-    ax.plot(sh_p[-1], sh_x[-1], "*", ms=14, color="C3", zorder=4)
-    for i in range(len(sided_history)):
-        if i % max(1, len(sided_history) // 10) == 0 or i == len(sided_history) - 1:
-            ax.annotate(
-                str(i), (sh_p[i], sh_x[i]), textcoords="offset points", xytext=(5, 3),
-                fontsize=7, color="0.35",
-            )
-    ax.axhline(0.0, color="k", lw=0.8, alpha=0.4)
-    if sided_root is not None:
-        ax.axvline(float(sided_root[0]), color="C3", ls="--", lw=0.9, alpha=0.75)
-    pad = max(5.0 * abs(sided_step), 0.25 * (sh_p.max() - sh_p.min()), 0.03)
-    ax.set_xlim(sh_p.min() - pad, sh_p.max() + 0.25 * pad)
-    ax.set_xlabel(r"$\bar P$")
-    ax.set_ylabel(r"$X(S_1^{(n)})$")
-    ax.set_title(rf"Sided search path ($\eta={eta:g}$)")
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1]
-    ax.plot(steps, np.abs(sh_x), "o-", ms=4, lw=1.2, color="C1")
-    ax.axhline(float(scan.get("x_tol", STAGE1_P_ROOT_X_TOL_DEFAULT)), color="C3", ls=":", lw=0.9,
-               label=r"$|X|$ tolerance")
-    ax.set_xlabel("sided-search step")
-    ax.set_ylabel(r"$|X(S_1^{(n)})|$")
-    ax.set_title(r"$|X|$ vs iteration")
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    out_path = Path(out_dir) / "e_star_sided_progression.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    return out_path
-
-
-def step_backward_from_E(
-    eta: float,
-    C0: float,
-    *,
-    T_d: float = 1.0,
-    kappa: float = 1.0,
-    dt: float = 0.005,
-    tau_stop: float = BS_TAU_D_REF,
-    cache: Path,
-    seed_from: str = "from_pear",
-    pear_cache: Optional[Path] = None,
-    use_cache: bool = True,
-    verbose: bool = False,
-) -> Tuple[List[MeridianSolution], MeridianSolution, Dict[str, float]]:
-    """Match cached pear at **E**, then march backward to ``τ ≈ tau_stop``.
-
-    Uses the same appendix-B straight-line ``(c₀, v̄)`` shoot as pear→D, but
-    targets ``(c₀, v̄) = (2√2, 2^{-1/2})`` at ``A = 2A₀``.  Default warm
-    start is the rescaled stage-2.5 pear (``seed_from="from_pear"``); optionally
-    use the pear already at **D** (``seed_from="from_D"``).
-
-    Returns ``(track, E_sol, e_state)`` with track ordered from ``τ=1`` down
-    to ``τ≈tau_stop`` (index 0 is **E**).
-    """
-    st_E = bs_point_e_landmark_state(C0, T_d=T_d, eta=eta, kappa=kappa)
-    seed_key = _normalize_seed_from(seed_from)
-
-    if use_cache:
-        cached = load_backward_track(cache)
-        manifest = _read_manifest(cache)
-        cached_seed = manifest.get("backward_from_E_seed")
-        if (
-            cached is not None
-            and pear_branch_at_E_ok(cached[0])
-            and (cached_seed is None or cached_seed == seed_key)
-        ):
-            return cached, cached[0], st_E
-        if cached is not None and cached_seed != seed_key and verbose:
-            print(
-                f"  backward: ignore cached track "
-                f"(seed {cached_seed!r} ≠ {seed_key!r})",
-                flush=True,
-            )
-
-    warm = resolve_pear_warm_for_E(
-        cache=cache, seed_from=seed_key, pear_cache=pear_cache,
-        T_d=T_d, C0=C0, use_cache=use_cache, verbose=verbose,
-    )
-    pear_at_E, st_E = step_pear_at_E(
-        warm, C0=C0, eta=eta, T_d=T_d, kappa=kappa,
-        cache=cache, seed_from=seed_key, use_cache=use_cache, verbose=verbose,
-    )
-    e_sol = _pear_seed_at_E(
-        pear_at_E, st_E, C0=C0, eta=eta, T_d=T_d, kappa=kappa,
-    )
-    if verbose:
-        print(
-            f"  E @ pear shoot: ok={e_sol.success}  v̄={e_sol.v:.6f} c₀={e_sol.c0:.6f}  "
-            f"U₀={e_sol.U0:.6f} U₁={e_sol.U1:.6f} S₁={e_sol.S1:.4f}  "
-            f"P̄={e_sol.P_bar:.4f} Σ̄={e_sol.sigma_bar:.4f}  "
-            f"A/A₀={st_E['A_over_A0']:.3f}",
-            flush=True,
-        )
-
-    track = continue_bozic_svetina_backward(
-        e_sol, eta=eta, T_d=T_d, kappa=kappa, dt=dt,
-        t_stop=float(tau_stop * T_d), C0_dim=C0, max_dv=0.008,
-        u0_window=0.5, lock_branch_steps=20, u0_window_late=2.0,
-        verbose=verbose,
-    )
-    ok = [s for s in track if s.success and len(s.s) > 0]
-    if len(ok) < 2:
-        raise RuntimeError("backward continuation from E produced fewer than 2 frames")
-    if use_cache:
-        save_backward_track(cache, ok, seed_from=seed_key)
-    return ok, e_sol, st_E
-
-
-def save_backward_shooting_plot(
-    track: Sequence[MeridianSolution],
-    *,
-    eta: float,
-    T_d: float = 1.0,
-    out_dir: Path,
-    e_star: Optional[Dict[str, float]] = None,
-) -> Path:
-    """Shooting parameters vs τ for the backward **E**→D diagnostic track."""
-    import matplotlib.pyplot as plt
-
-    ok = sorted(
-        [s for s in track if s.success],
-        key=lambda s: float(s.constraints.get("t_growth", 0.0)),
-        reverse=True,
-    )
-    ts = np.array([s.constraints["t_growth"] for s in ok]) / T_d
-    vs = np.array([s.v for s in ok])
-    cs = np.array([s.c0 for s in ok])
-    u0s = np.array([s.U0 for s in ok])
-    u1s = np.array([s.U1 for s in ok])
-    s1s = np.array([s.S1 for s in ok])
-    pbs = np.array([s.P_bar for s in ok])
-    sigs = np.array([s.sigma_bar for s in ok])
-
-    fig, axes = plt.subplots(2, 3, figsize=(12, 6.5))
-    ax = axes[0, 0]
-    ax.plot(ts, vs, "o-", ms=4)
-    ax.axhline(BS_V_TWO_SPHERE, color="0.5", ls=":", lw=0.8)
-    ax.set_xlabel(r"$\tau$")
-    ax.set_ylabel(r"$\bar v$")
-    ax.set_title(r"$\bar v$ vs $\tau$ (backward)")
-    ax.invert_xaxis()
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[0, 1]
-    ax.plot(ts, cs, "o-", ms=4, color="C1")
-    ax.axhline(BS_C0_END, color="0.5", ls=":", lw=0.8)
-    ax.set_xlabel(r"$\tau$")
-    ax.set_ylabel(r"$c_0$")
-    ax.set_title(r"$c_0$ vs $\tau$")
-    ax.invert_xaxis()
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[0, 2]
-    ax.plot(cs, vs, "o-", ms=4, color="C2")
-    ax.plot([BS_C0_START, BS_C0_END], [1.0, BS_V_TWO_SPHERE], "k--", lw=0.6, alpha=0.4)
-    ax.set_xlabel(r"$c_0$")
-    ax.set_ylabel(r"$\bar v$")
-    ax.set_title(r"Path in $(c_0, \bar v)$")
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1, 0]
-    ax.plot(ts, u0s, "o-", ms=4, label=r"$U_0$")
-    ax.plot(ts, u1s, "s-", ms=4, label=r"$U_1$")
-    if e_star is not None:
-        if "U0" in e_star:
-            ax.axhline(e_star["U0"], color="C0", ls=":", lw=0.7, alpha=0.6)
-        if "U1" in e_star:
-            ax.axhline(e_star["U1"], color="C1", ls=":", lw=0.7, alpha=0.6)
-    ax.set_xlabel(r"$\tau$")
-    ax.set_ylabel(r"$U$")
-    ax.set_title(r"Curvatures $U_0$, $U_1$")
-    ax.invert_xaxis()
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1, 1]
-    ax.plot(ts, s1s, "o-", ms=4, color="C3")
-    if e_star is not None and "S1" in e_star:
-        ax.axhline(e_star["S1"], color="0.5", ls=":", lw=0.8)
-    ax.set_xlabel(r"$\tau$")
-    ax.set_ylabel(r"$S_1$")
-    ax.set_title(r"Meridian half-length $S_1$")
-    ax.invert_xaxis()
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1, 2]
-    ax.plot(ts, pbs, "o-", ms=4, label=r"$\bar P$")
-    ax.plot(ts, sigs, "s-", ms=4, label=r"$\bar\Sigma$")
-    ax.set_xlabel(r"$\tau$")
-    ax.set_ylabel("multiplier")
-    ax.set_title(r"$\bar P$, $\bar\Sigma$")
-    ax.invert_xaxis()
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    fig.suptitle(rf"Backward from E* ($\eta={eta:g}$, $\tau$: 1 $\to$ {ts.min():.3f})")
-    fig.tight_layout()
-    out_path = Path(out_dir) / "backward_shooting.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    return out_path
-
-
 def step5_full_track(
     prolate: Sequence[MeridianSolution],
     pear: Sequence[MeridianSolution],
@@ -3069,8 +2008,6 @@ def save_growth_plots(
     out_dir: Path,
 ) -> Path:
     """Area/volume vs τ and path in (c₀, v̄); save ``growth_path.png`` under *out_dir*."""
-    import matplotlib.pyplot as plt
-
     ok = [s for s in full if s.success]
     A0, V0 = landmarks.A_phys_ref, landmarks.V_phys_ref
     ts = np.array([s.constraints["t_growth"] for s in ok]) / T_d
@@ -3136,51 +2073,6 @@ def save_growth_plots(
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return out_path
-
-
-def step5_two_sphere_finish(
-    *,
-    A0: float,
-    V0: float,
-    t0: float,
-    taus_P: Sequence[float],
-    P_bars: Sequence[float],
-    T_d: float = 1.0,
-    C0: float = 1.0,
-    eta: float = 1.85,
-    kappa: float = 1.0,
-    dt: float = 2.5e-4,
-    P_fit_window: float = 0.02,
-    tau_stop: float = 1.0,
-    verbose: bool = True,
-) -> Tuple[List[MeridianSolution], Dict[str, float]]:
-    """Continue past pear-shoot failure with thin-neck two-spheres + linear ``P̄(τ)``.
-
-    Geometry at each step from ``(A, V)``::
-
-        4π (R₁² + R₂²) = A
-        (4π/3) (R₁³ + R₂³) = V
-
-    ``P̄(τ)`` is a least-squares line fit to pear-shoot pressures on
-    ``[τ₀ − P_fit_window, τ₀]`` with ``τ₀ = t0/T_d``.  Volume is advanced with
-    the BS ODE using that extrapolated pressure (no meridian shoot).
-    """
-    tau0 = float(t0) / float(T_d)
-    P_of_tau, meta = fit_P_bar_linear(
-        taus_P, P_bars, tau_lo=tau0 - float(P_fit_window), tau_hi=tau0,
-    )
-    if verbose:
-        print(
-            f"  two-sphere P̄ fit: a={meta['a']:.6f} b={meta['b']:.6f}  "
-            f"n={meta['n']}  P̄(fail)={meta['P_fail']:.4f}  P̄(1)={meta['P_E']:.4f}",
-            flush=True,
-        )
-    track = continue_two_sphere_to_E(
-        A0=float(A0), V0=float(V0), t0=float(t0),
-        P_of_tau=P_of_tau, T_d=T_d, C0_dim=C0, eta=eta, kappa=kappa,
-        dt=dt, tau_stop=tau_stop, verbose=verbose,
-    )
-    return track, meta
 
 
 # ===== Two-sphere finish + full assembly =====
@@ -4301,28 +3193,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         recompute=bool(args.recompute) and not args.plot_only,
         verbose=True,
     )
-
-    plot_two_sphere_detail(rows, OUT)
-    print(f"saved {OUT / 'two_sphere_finish.png'}", flush=True)
-
-    end = rows[-1]
-    R1, R2 = float(end["R1"]), float(end["R2"])
-    x, z = two_sphere_meridian(R1, R2)
-    fig, ax = plt.subplots(figsize=(4.2, 5.5))
-    ax.plot(x, z, "-", color="#c45c26", lw=2)
-    ax.plot(-x, z, "-", color="#c45c26", lw=2)
-    ax.set_aspect("equal")
-    ax.set_title(
-        rf"two-sphere @ $\tau={end['tau']:.4f}$"
-        + "\n"
-        + rf"$R_1={R1:.3f}$, $R_2={R2:.3f}$, $\bar v={end['v']:.4f}$"
-    )
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    prof = OUT / "two_sphere_at_E.png"
-    fig.savefig(prof, dpi=140)
-    plt.close(fig)
-    print(f"saved {prof}", flush=True)
 
     tau_fail = float(meta.get("tau_fail", rows[0]["tau"]))
     tau_D = float(meta.get("tau_D", BS_TAU_D_REF))

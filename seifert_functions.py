@@ -20,13 +20,7 @@ from scipy.integrate import solve_ivp
 from scipy.optimize import brentq, least_squares
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
-PROJECT_ROOT = PACKAGE_ROOT.parent
-
-LUKE_NOTEBOOK = PROJECT_ROOT / "luke_vesicle_shapes.ipynb"
-
 A_STAR = 4.0 * np.pi
-
-R_AREA = 1.0  # R₀ with A = 4π R₀²
 
 V_STAR = lambda v: (4.0 * np.pi / 3.0) * v
 
@@ -82,8 +76,6 @@ FIG16_REFINE_MAX_STEP = 1e-3  # stage-2 / dense trial plots (paper step size)
 
 FIG16_CROSSING_DEFAULT = 1  # S₁^{(n)} index n (n-th time ψ = π)
 
-FIG16_N_MAX_DEFAULT = 3  # scan S₁^{(n)} for n = 1 … N_MAX
-
 FIG16_PSI_MIN = -2.0 * np.pi  # discard if ψ < −2π (Fig. 16 caption)
 
 FIG16_PSI_MAX = 3.0 * np.pi   # discard if ψ > 3π (Fig. 16 caption, n = 1)
@@ -134,12 +126,6 @@ STAGE2_RESIDUAL_TIMEOUT = 1.0  # wall-clock cap per stage-2 residual evaluation
 
 STAGE3_RESIDUAL_TIMEOUT = 2.5  # wall-clock cap per stage-3 residual evaluation
 
-STAGE1_ROOT_STEP_SCALED_DEFAULT = 1e-4  # initial leftward march in U(0) P̄^{-1/3}
-
-STAGE1_ROOT_STEP_SCALED_MIN = 1e-12  # stop bisect / halving below this (scaled U(0))
-
-STAGE1_ROOT_X_TOL_SCALED_DEFAULT = 1e-4  # target |X(S₁)| P̄^{1/3}
-
 STAGE1_ROOT_MARCH_MAX = 500  # max outer march iterations
 
 STAGE1_ROOT_BISECT_MAX = 80  # max bisection refinements per bracket
@@ -150,11 +136,7 @@ STAGE1_P_ROOT_STEP_MIN = 1e-8  # stop bisect / halving below this in P̄
 
 STAGE1_P_ROOT_X_TOL_DEFAULT = 3e-2  # target |X(S₁)| at P̄ root
 
-DEFAULT_CACHE = PACKAGE_ROOT / "cache" / "seifert_shapes"
-
 DEFAULT_BS_CACHE = PACKAGE_ROOT / "cache"
-
-DEFAULT_FIGURES = Path("figures/seifert")
 
 def C2(X: float, psi: float) -> float:
     """Azimuthal curvature C₂ = sin ψ / X (eq. 3.1d; regularized at the pole)."""
@@ -1378,108 +1360,6 @@ def scan_branch_seeds(
     out.sort(key=lambda t: t[0])
     return out
 
-def integrate_trial(
-    U0: float,
-    *,
-    c0: float,
-    P_bar: float,
-    sigma_bar: Optional[float] = None,
-    n: int = 200,
-    S_max: float = FIG16_SCAN_S_MAX,
-    n_s1: int = FIG16_CROSSING_DEFAULT,
-    crossing: Optional[int] = None,
-    max_step: float = FIG16_REFINE_MAX_STEP,
-    timeout: Optional[float] = None,
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-    """Integrate a trial contour to ``S₁^{(n_s1)}`` (``n_s1``-th time ``ψ = π``).
-
-    Returns ``(S, X, Z, y_end)`` or ``None`` if a discard rule fires or
-    ``timeout`` seconds elapse (same wall-clock cap as :func:`scan_u0`).
-    """
-    out, timed_out = _call_with_timeout(
-        timeout,
-        _integrate_trial_impl,
-        U0,
-        c0=c0,
-        P_bar=P_bar,
-        sigma_bar=sigma_bar,
-        n=n,
-        S_max=S_max,
-        n_s1=n_s1,
-        crossing=crossing,
-        max_step=max_step,
-    )
-    if timed_out:
-        return None
-    return out
-
-def _integrate_trial_impl(
-    U0: float,
-    *,
-    c0: float,
-    P_bar: float,
-    sigma_bar: Optional[float] = None,
-    n: int = 200,
-    S_max: float = FIG16_SCAN_S_MAX,
-    n_s1: int = FIG16_CROSSING_DEFAULT,
-    crossing: Optional[int] = None,
-    max_step: float = FIG16_REFINE_MAX_STEP,
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-    if crossing is not None:
-        n_s1 = int(crossing)
-    if sigma_bar is None:
-        sigma_bar = sigma_bar_from_P(P_bar)
-
-    if max_step >= FIG16_SCAN_MAX_STEP:
-        rtol, atol = FIG16_SCAN_RTOL, FIG16_SCAN_ATOL
-    else:
-        rtol, atol = 1e-7, 1e-9
-
-    C0 = C0_dimensional(c0, A_STAR)
-    rhs = lambda S, y: meridian_rhs(S, y, C0, sigma_bar, P_bar)
-    S_cur = S_POLE
-    y_cur = north_pole_state(U0, C0=C0, sigma_bar=sigma_bar, P_bar=P_bar)
-    s_parts: List[np.ndarray] = []
-    y_parts: List[np.ndarray] = []
-    yf: Optional[np.ndarray] = None
-    n_per = max(20, int(n // max(n_s1, 1)))
-    events = _u0_scan_events(n=n_s1)
-
-    for k in range(1, n_s1 + 1):
-        out = _solve_u0_ivp(
-            rhs, (S_cur, S_max), y_cur, events,
-            max_step=max_step, rtol=rtol, atol=atol,
-        )
-        if out is None:
-            return None
-        ivp, ei, s_hit = out
-        if ei != 0:
-            return None
-        yf = ivp.y[:, -1].copy()
-        # Dense segment for plotting (do not apply X-discard until final hit).
-        ivp_dense = solve_ivp(
-            rhs, (S_cur, s_hit), y_cur, method="RK45", dense_output=True,
-            rtol=rtol, atol=atol, max_step=max_step,
-        )
-        if not ivp_dense.success or ivp_dense.sol is None:
-            return None
-        s_seg = np.linspace(S_cur, s_hit, n_per)
-        y_seg = ivp_dense.sol(s_seg)
-        s_parts.append(s_seg)
-        y_parts.append(y_seg)
-        if k < n_s1:
-            S_cur = s_hit + 1e-4
-            y_cur = yf
-            u_dir = float(np.sign(y_cur[3])) or 1.0
-            y_cur[2] = PSI_SOUTH + u_dir * 1e-3
-
-    assert yf is not None and s_parts
-    if _discard_u0_trial(yf, P_bar, n=n_s1):
-        return None
-    s_full = np.concatenate(s_parts)
-    y_full = np.concatenate(y_parts, axis=1)
-    return s_full, y_full[0], y_full[1], yf
-
 def integrate_stage1_profile(
     U0: float,
     *,
@@ -1592,22 +1472,6 @@ def u0_grid(
         u_min, u_max + 0.5 * step, step,
     )
     return np.asarray(scaled, dtype=float) * p_pos
-
-sigma_bar_fig16 = sigma_bar_from_P
-
-scan_U0_fig16 = scan_u0
-
-fig16_near_zero_seeds = near_zero_seeds
-
-fig16_branch_guesses = near_zero_seeds
-
-fig16_branch_candidates = near_zero_seeds
-
-fig16_branch_scan = scan_branch_seeds
-
-fig16_u0_grid = u0_grid
-
-integrate_fig16_trial = integrate_trial
 
 def _stitch_meridian_profile(
     sn: np.ndarray,
@@ -3164,7 +3028,6 @@ def _continue_report(
     )
 
 
-
 def bending_energy(
     sol: MeridianSolution,
     *,
@@ -3195,8 +3058,6 @@ def bending_energy(
     C2 = np.sin(psi) / Xr
     dens = 0.5 * float(kappa) * (U + C2 - C0) ** 2 * (2.0 * np.pi * np.maximum(X, 0.0))
     return float(np.trapz(dens, s))
-
-
 
 
 def _cache_path(cache_dir: Path, v: float, c0: float) -> Path:

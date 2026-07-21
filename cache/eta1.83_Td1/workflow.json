@@ -1,0 +1,30 @@
+{
+  "pear_stage25": "pear_stage25.json",
+  "pear_stage25_index": 0,
+  "meta": {
+    "eta": 1.83,
+    "C0": 1.0,
+    "T_d": 1.0,
+    "dt": 0.001,
+    "v_bump": 1e-05,
+    "prolate_u_bump": 3e-05,
+    "prolate_p_bump": 3e-05,
+    "tau_D": 0.9479727556246293,
+    "D_by": "bending_energy",
+    "from_cache": true
+  },
+  "growth_track": "growth_track.json",
+  "landmark_indices": {
+    "B": 0,
+    "C": 271,
+    "D": 338
+  },
+  "landmarks_meta": {
+    "started_at_B": true,
+    "A_phys_ref": 50.26548245743669,
+    "V_phys_ref": 33.510321638291124
+  },
+  "pear_stage3": "pear_stage3.json",
+  "pear_growth_track": "pear_growth_track.json",
+  "full_track": "full_track.json"
+}

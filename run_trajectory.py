@@ -18,8 +18,6 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from seifert_plotting import animate_meridian_trajectory
-
 from bs_functions import (
     cache_dir,
     results_dir,
@@ -30,14 +28,14 @@ from bs_functions import (
     step4_pear_to_E,
     step5_full_track,
 )
-from bs_plotting import run_two_sphere_finish, save_growth_plots
+from bs_plotting import run_two_sphere_finish
 
 ETA = 1.83
 C0, T_D, KAPPA = 1.0, 1.0, 1.0
 DT = 0.001
 V_BUMP = 1e-5
 PROLATE_U_BUMP, PROLATE_P_BUMP = 3e-5, 3e-5
-USE_CACHE = True
+USE_CACHE = False
 CACHE = cache_dir(ETA, T_D)
 OUT = results_dir(ETA)
 
@@ -89,22 +87,17 @@ def main() -> None:
     full = step5_full_track(track, past_ok, D, cache=CACHE, use_cache=USE_CACHE)
     shapes_dir = OUT / "shapes"
     save_trajectory(shapes_dir, full, name="trajectory")
-    plot_path = save_growth_plots(full, lm, D, eta=ETA, T_d=T_D, out_dir=OUT)
-    mp4 = OUT / "trajectory.mp4"
-    animate_meridian_trajectory(full, mp4, fps=10, max_frames=1000)
     A0, V0 = lm.A_phys_ref, lm.V_phys_ref
     print(
         f"5) Seifert shoot track → {OUT}/\n"
         f"   shapes: {shapes_dir}\n"
-        f"   plots:  {plot_path}\n"
-        f"   video:  {mp4}\n"
         f"   A/A₀ {full[0].constraints['A_phys']/A0:.3f}→"
         f"{full[-1].constraints['A_phys']/A0:.3f}  "
         f"V/V₀ {full[0].constraints['V_phys']/V0:.3f}→"
         f"{full[-1].constraints['V_phys']/V0:.3f}"
     )
 
-    print("6) two-sphere finish + full trajectory plots…", flush=True)
+    print("6) assembling canonical full trajectory outputs…", flush=True)
     run_two_sphere_finish(eta=ETA, recompute=True)
 
 
