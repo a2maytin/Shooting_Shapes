@@ -30,12 +30,13 @@ from bs_functions import (
 )
 from bs_plotting import run_two_sphere_finish
 
-ETA = 1.83
+ETA = .7
 C0, T_D, KAPPA = 1.0, 1.0, 1.0
 DT = 0.001
+DT_2 = 0.0001
 V_BUMP = 1e-5
 PROLATE_U_BUMP, PROLATE_P_BUMP = 3e-5, 3e-5
-USE_CACHE = False
+USE_CACHE = True
 CACHE = cache_dir(ETA, T_D)
 OUT = results_dir(ETA)
 
@@ -74,9 +75,9 @@ def main() -> None:
     )
 
     past_ok = step4_pear_to_E(
-        pear_at_D, D, st, eta=ETA, C0=C0, T_d=T_D, kappa=KAPPA, dt=DT,
+        pear_at_D, D, st, eta=ETA, C0=C0, T_d=T_D, kappa=KAPPA, dt=DT_2,
         cache=CACHE, use_cache=USE_CACHE,
-        max_residual=1e-5, max_step_time=30.0,
+        max_residual=1e-4, max_step_time=30.0,
     )
     tau_end = float(past_ok[-1].constraints["t_growth"]) / T_D
     print(

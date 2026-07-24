@@ -310,7 +310,8 @@ class MeridianSolution:
     def copy(self) -> "MeridianSolution":
         return replace(self)
 
-TWO_LEG_BOUNDS = ([-3.0, -8.0, 0.5, -80.0, -80.0], [20.0, 20.0, 18.0, 80.0, 80.0])
+# U₀ lower bound must admit deep stomatocytes at A★ (e.g. free-close U₀ ≲ −7).
+TWO_LEG_BOUNDS = ([-20.0, -8.0, 0.5, -80.0, -80.0], [20.0, 20.0, 18.0, 80.0, 80.0])
 
 def sigma_bar_from_P(P_bar: float) -> float:
     """Σ̄ = -1.1 · P̄^{2/3} (Seifert reduced c₀ = 0 example)."""
@@ -1757,12 +1758,19 @@ def _stage2_closure_residual(
     rtol: float = 1e-9,
     atol: float = 1e-11,
     A_c0: float = A_STAR,
+    enforce_fig16: bool = False,
 ) -> np.ndarray:
-    """Appendix B stage 2: match ``ψ, U, X`` at ``S̄``; ``γ`` via conserved ``H``."""
+    """Appendix B stage 2: match ``ψ, U, X`` at ``S̄``; ``γ`` via conserved ``H``.
+
+    Fig.~16 ψ-window discard is off by default (same as :func:`_shoot_two_leg`
+    residuals): stage-2 only cares about junction closure, and stomatocyte legs
+    often leave the Fig.~16 scan window while still being valid shoots.
+    """
     U0, U1, S1 = map(float, x)
     S_bar = junction_frac * S1
     out = _integrate_two_legs_totals(
-        U0, U1, S1, S_bar, sigma_bar, P_bar, c0, rtol=rtol, atol=atol, A_c0=A_c0,
+        U0, U1, S1, S_bar, sigma_bar, P_bar, c0,
+        rtol=rtol, atol=atol, A_c0=A_c0, enforce_fig16=enforce_fig16,
     )
     if out is None:
         return np.full(3, 1e3)
@@ -1780,6 +1788,7 @@ def _stage2_closure_residual_safe(
     rtol: float = 1e-9,
     atol: float = 1e-11,
     A_c0: float = A_STAR,
+    enforce_fig16: bool = False,
 ) -> np.ndarray:
     """Like :func:`_stage2_closure_residual` but skips pathological ``U₁`` trials."""
     out, timed_out = _call_with_timeout(
@@ -1793,6 +1802,7 @@ def _stage2_closure_residual_safe(
         rtol=rtol,
         atol=atol,
         A_c0=A_c0,
+        enforce_fig16=enforce_fig16,
     )
     if timed_out or out is None:
         return np.full(3, 1e3)
@@ -1889,6 +1899,7 @@ def shoot_appendix_b_stage2(
     out = _integrate_two_legs_totals(
         U0f, U1f, S1f, S_bar, sigma_bar, P_bar, c0,
         dense=True, n=n, rtol=1e-8, atol=1e-10, A_c0=A_c0,
+        enforce_fig16=False,
     )
     if out is None:
         return MeridianSolution(
@@ -2716,6 +2727,43 @@ def _stage3_pear_step_ok(
     return True
 
 
+def _stage3_stomatocyte_step_ok(
+    sol: MeridianSolution,
+    *,
+    min_v: float = 0.50,
+    warm: Optional[MeridianSolution] = None,
+    junction_match_tol: float = 0.08,
+    s1_max_rel_jump: float = 0.08,
+) -> bool:
+    """True when a continuation step stays on a stomatocyte-like branch.
+
+    Unlike the pear checker, this does **not** use ``_score_prolate_candidate``
+    (which hard-rejects ``U₀ ≤ 0.4`` and would discard every stomatocyte).
+    """
+    if len(sol.s) < 5:
+        return False
+    if float(sol.v) < float(min_v):
+        return False
+    # North pole should be inverted (cup).
+    if float(sol.U0) > 0.05:
+        return False
+    c = sol.constraints
+    res = float(c.get("residual", float("inf")))
+    psi = abs(float(c.get("psi_match", 1.0)))
+    x_m = abs(float(c.get("X_match", 1.0)))
+    if not np.isfinite(res):
+        res = float("inf")
+    if res > 0.20 and not sol.success:
+        return False
+    if psi > float(junction_match_tol) or x_m > float(junction_match_tol):
+        return False
+    if warm is not None and float(warm.S1) > 0.0:
+        rel_jump = abs(float(sol.S1) - float(warm.S1)) / float(warm.S1)
+        if rel_jump > float(s1_max_rel_jump):
+            return False
+    return True
+
+
 def pear_branch_at_E_ok(sol: MeridianSolution, *, rtol: float = 5e-3) -> bool:
     """True when ``sol`` is the asymmetric pear/dumbbell **E**, not prolate **E**."""
     if not (
@@ -2743,26 +2791,35 @@ def _stage3_cv_shoot_step(
     cv_bisect_max: int,
     verbose: bool,
     step_label: str,
+    family: str = "pear",
 ) -> Tuple[MeridianSolution, bool]:
-    """Shoot one ``(c₀,v̄)`` increment; bisect when strict pear checks fail."""
+    """Shoot one ``(c₀,v̄)`` increment; bisect when branch checks fail."""
     c_w, v_w = float(warm.c0), float(warm.v)
     c_pt, v_pt = float(c_try), float(v_try)
     sol_try: Optional[MeridianSolution] = None
     ok = False
     for k in range(int(cv_bisect_max) + 1):
         sol_try = solve_seifert(float(v_pt), float(c_pt), prev=warm, **ramp_kw)
-        ok = _stage3_pear_step_ok(
-            sol_try, min_v=pear_min_v, warm=warm, strict_pear=strict_pear,
-            min_asym=pear_min_asym, junction_match_tol=junction_match_tol,
-            s1_max_rel_jump=s1_max_rel_jump,
-        )
-        if ok or not strict_pear or k == cv_bisect_max:
+        if family == "stomatocyte":
+            ok = _stage3_stomatocyte_step_ok(
+                sol_try, min_v=pear_min_v, warm=warm,
+                junction_match_tol=junction_match_tol,
+                s1_max_rel_jump=s1_max_rel_jump,
+            )
+        else:
+            ok = _stage3_pear_step_ok(
+                sol_try, min_v=pear_min_v, warm=warm, strict_pear=strict_pear,
+                min_asym=pear_min_asym, junction_match_tol=junction_match_tol,
+                s1_max_rel_jump=s1_max_rel_jump,
+            )
+        # Always bisect on failure (do not skip bisect in non-strict pear mode).
+        if ok or k == cv_bisect_max:
             break
         c_pt = 0.5 * (c_w + c_pt)
         v_pt = 0.5 * (v_w + v_pt)
         if verbose:
             print(
-                f"  {step_label}: pear branch reject @ c₀={float(c_try):.4f} "
+                f"  {step_label}: branch reject @ c₀={float(c_try):.4f} "
                 f"v̄={float(v_try):.4f}  bisect [{k + 1}/{cv_bisect_max}] "
                 f"→ c₀={c_pt:.4f} v̄={v_pt:.4f}",
                 flush=True,
@@ -2791,16 +2848,21 @@ def solve_stage3_from_appendix_b(
     s1_max_rel_jump: float = 0.035,
     cv_bisect_max: int = 5,
     polish: bool = True,
+    family: str = "pear",
     **shoot_kw,
 ) -> MeridianSolution:
-    """Match growth-track ``(A, v̄, c₀)`` at D from a stage-2.5 pear warm start.
+    """Match growth-track ``(A, v̄, c₀)`` at D from a stage-2.5 warm start.
+
+    ``family="pear"`` (default) or ``"stomatocyte"`` selects the branch
+    acceptance test along the ``(c₀,v̄)`` line.
 
     (1) Junction refine via stage-2 shooting (``U₀,U₁,S₁``; ``v̄,c₀`` may shift),
     (2) straight-line continuation in ``(c₀, v̄)`` to D with full two-leg shoots
-        at ``A = A_D`` (avoids a c₀-only jump across the pear discontinuity),
+        at ``A = A_D`` (avoids a c₀-only jump across a branch discontinuity),
     (3) optional final polish at the target.
     """
     v_tgt, c0_tgt = float(v), float(c0)
+    family = str(family).lower().strip() or "pear"
     if "min_v_steps" in shoot_kw:
         min_cv_steps = int(shoot_kw.pop("min_v_steps"))
     warm = warm_start
@@ -2905,6 +2967,7 @@ def solve_stage3_from_appendix_b(
                 cv_bisect_max=cv_bisect_max,
                 verbose=verbose,
                 step_label=f"cv [{i + 1}/{len(c_track)}]",
+                family=family,
             )
             _path_note(
                 "cv_line", float(sol_try.v), float(sol_try.c0), ok=ok,
@@ -2951,6 +3014,23 @@ def solve_stage3_from_appendix_b(
         sol.constraints["stage3_path"] = path
         sol.constraints["stage3_target_v"] = v_tgt
         sol.constraints["stage3_target_c0"] = c0_tgt
+        sol.constraints["stage3_family"] = family
+        # Stomatocyte: do not accept a high-residual final as success.
+        if family == "stomatocyte":
+            res = float(sol.constraints.get("residual", float("inf")))
+            psi = abs(float(sol.constraints.get("psi_match", 1.0)))
+            xm = abs(float(sol.constraints.get("X_match", 1.0)))
+            if (not np.isfinite(res) or res > 0.08 or psi > 0.08 or xm > 0.08
+                    or float(sol.U0) > 0.05):
+                sol = replace(
+                    sol,
+                    success=False,
+                    message=(
+                        sol.message + "; stomatocyte stage-3 residual/junction gate"
+                        if sol.message else
+                        "stomatocyte stage-3 residual/junction gate"
+                    ),
+                )
     return sol
 
 def _junction_frac_from_warm(warm: MeridianSolution) -> Optional[float]:
