@@ -18,3 +18,23 @@ python run_trajectory.py
 https://github.com/user-attachments/assets/a1618bfa-e6ff-47f2-b138-a9d3a2a6da68
 
 <img width="2175" height="1200" alt="full_trajectory" src="https://github.com/user-attachments/assets/8f6ab613-e107-4d46-b587-b0760af7a9de" />
+
+## Some more examples (re-entrant trajectory, inward budding trajectory)
+
+
+
+https://github.com/user-attachments/assets/efa1666c-3e55-4858-a393-d867ddef78ab
+
+
+<img width="2175" height="1200" alt="full_trajectory" src="https://github.com/user-attachments/assets/1087dc6a-1d02-4422-9208-510d29dd6a94" />
+
+
+
+
+https://github.com/user-attachments/assets/023b4af6-8f31-4362-a5ad-f0638df9de05
+
+
+
+<img width="2175" height="1200" alt="full_trajectory" src="https://github.com/user-attachments/assets/8e0a5ecf-ff4a-4de7-bd9c-a1d726bf2bab" />
+
+
