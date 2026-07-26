@@ -1,6 +1,6 @@
 """Božič–Svetina growth, landmarks B/D, workflow steps, and two-sphere finish.
 
-Shape equilibria come from ``seifert_functions`` (Appendix-B shooting).
+Shape equilibria come from ``seifert_functions`` (two-leg Seifert shooting).
 """
 from __future__ import annotations
 
@@ -20,14 +20,12 @@ from seifert_functions import (
     DEFAULT_BS_CACHE,
     MeridianSolution,
     V_at_area,
-    _continue_report,
     _shoot_two_leg,
-    _track_index,
     area_radius,
     bending_energy,
     c0_reduced,
-    integrate_appendix_b_stage2,
-    integrate_stage25_pear_at_D,
+    integrate_two_leg,
+    integrate_pear_at_landmark,
     load_solution,
     load_solution_list,
     load_trajectory,
@@ -36,7 +34,28 @@ from seifert_functions import (
     save_solution_list,
     save_trajectory,
     solve_seifert,
-    solve_stage3_from_appendix_b,
+    match_AV_from_seed,
+)
+
+from shapes import (
+    L_sto_reduced_volume,
+    NestedSphere,
+    TwoSphere,
+    approx_oblate_energy,
+    approx_pear_energy_two_sphere,
+    approx_prolate_energy,
+    nested_sphere_energy,
+    nested_sphere_meridian,
+    nested_sphere_pressure_from_dEdV,
+    nested_sphere_radii_from_AV,
+    nested_sphere_radii_from_v,
+    nested_sphere_signed_radii_from_AV,
+    orient_two_sphere_radii,
+    sphere_meridian,
+    two_sphere_alpha_from_v,
+    two_sphere_meridian,
+    two_sphere_radii_from_AV,
+    two_sphere_radii_from_v,
 )
 
 import matplotlib.pyplot as plt
@@ -95,37 +114,61 @@ def load_stomatocyte_unstable_seed() -> MeridianSolution:
     return load_solution(resolve_stomatocyte_unstable_seed_path())
 
 
-def plot_seed_shape(
+def _continue_report(
+    i: int,
+    n_tot: int,
     sol: MeridianSolution,
-    out_path: Path,
-    *,
-    title: Optional[str] = None,
-    color: str = "#8b3a3a",
-) -> Path:
-    """Save a side-view meridian plot next to a seed JSON under ``seed_shapes/``."""
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    X = np.asarray(sol.X if hasattr(sol, "X") else sol.y[0], dtype=float)
-    Z = np.asarray(sol.Z if hasattr(sol, "Z") else sol.y[1], dtype=float)
-    if X.size < 2:
-        raise ValueError("seed solution has no meridian to plot")
-    Zc = Z - 0.5 * (float(Z.max()) + float(Z.min()))
-    fig, ax = plt.subplots(figsize=(4.5, 5.0))
-    ax.plot(X, Zc, "-", color=color, lw=2.0)
-    ax.plot(-X, Zc, "-", color=color, lw=2.0)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.3)
-    if title is None:
-        title = (
-            f"{out_path.stem}\n"
-            f"U0={sol.U0:.3f} U1={sol.U1:.3f}  v̄={sol.v:.4f} c₀={sol.c0:.3f}"
-        )
-    ax.set_title(title, fontsize=10)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    return out_path
+    tag: str,
+    dt: float,
+) -> None:
+    c = sol.constraints
+    res = c.get("residual", float("nan"))
+    T_d = float(c.get("T_d", 1.0))
+    tau = float(c.get("t_growth", float("nan"))) / T_d if T_d > 0 else float("nan")
+    dt_step = float(c.get("dt_step", float("nan")))
+    dt_nom = float(c.get("dt_nom", float("nan")))
+    step_msg = ""
+    if np.isfinite(dt_step) and dt_step > 0 and T_d > 0:
+        d_tau = dt_step / T_d
+        step_msg = f"  Δτ={d_tau:.4g}"
+        if np.isfinite(dt_nom) and dt_nom > 0:
+            step_msg += f" (dt/dt_nom={dt_step / dt_nom:.3f})"
+    tau_msg = f"τ={tau:.4f}  " if np.isfinite(tau) else ""
+    v_ode = c.get("v_ode")
+    v_msg = f"v̄={sol.v:.4f}"
+    if v_ode is not None and abs(float(v_ode) - sol.v) > 5e-4:
+        v_msg = f"v̄={sol.v:.4f}(ode={float(v_ode):.4f})"
+    print(
+        f"  [{i + 1}/{n_tot}] {tau_msg}{v_msg}  c₀={sol.c0:.4f}  {tag}  "
+        f"U0={sol.U0:+.4f}  U1={sol.U1:+.4f}  S1={sol.S1:.3f}  "
+        f"Σ̄={sol.sigma_bar:.3f}  P̄={sol.P_bar:.3f}  "
+        f"|res|={res:.2e}{step_msg}  ({dt:.2f}s)",
+        flush=True,
+    )
 
+
+def _track_index(track: Sequence[MeridianSolution], sol: MeridianSolution) -> Optional[int]:
+    """Best-effort index of ``sol`` inside ``track`` (for landmark manifests)."""
+    for i, s in enumerate(track):
+        if s is sol:
+            return i
+    key = (
+        round(float(sol.v), 8),
+        round(float(sol.c0), 8),
+        round(float(sol.constraints.get("t_growth", float("nan"))), 8),
+    )
+    for i, s in enumerate(track):
+        sk = (
+            round(float(s.v), 8),
+            round(float(s.c0), 8),
+            round(float(s.constraints.get("t_growth", float("nan"))), 8),
+        )
+        if sk == key:
+            return i
+    return None
+
+
+# Plotting: see bs_plotting.plot_seed_shape
 
 # ===== BS physics (from bs_solver) =====
 
@@ -147,17 +190,8 @@ BS_TAU_D_REF = 0.955  # fallback τ_D if energy crossing is unavailable
 BS_TAU_D_GROW_CEILING = 1.0  # safety ceiling if approx/exact crossing is late
 
 
-def approx_pear_energy_two_sphere(C0: float, R1: float, R2: float) -> float:
-    """Two-sphere pear energy approx: ``2π[(2−C₀R₁)²+(2−C₀R₂)²]``."""
-    C0 = float(C0)
-    return float(2.0 * np.pi * ((2.0 - C0 * float(R1)) ** 2 + (2.0 - C0 * float(R2)) ** 2))
-
-
-def approx_prolate_energy(c0: float, v: float) -> float:
-    """Near-sphere prolate energy approx: ``8π[(1−c₀/2)²−(6−c₀)(v̄−1)/3]``."""
-    c0 = float(c0)
-    v = float(v)
-    return float(8.0 * np.pi * ((1.0 - 0.5 * c0) ** 2 - (6.0 - c0) * (v - 1.0) / 3.0))
+# Geometry / energy helpers live in ``shapes/`` (re-exported above).
+# approx_pear_energy_two_sphere, approx_prolate_energy, nested/two-sphere radii, …
 
 
 def approx_D_radii(
@@ -232,9 +266,8 @@ def approx_D_energies(
     return E_pear, E_prol
 
 
-# Aliases for the negative-C₀ branch.
+# Aliases for the negative-C₀ branch (NearSphere / NestedSphere energies).
 approx_stomatocyte_energy_two_sphere = approx_pear_energy_two_sphere
-approx_oblate_energy = approx_prolate_energy
 
 
 def approx_D_energy_mismatch(
@@ -337,204 +370,6 @@ def approx_D_boundary_curve(
         vs.append(float(v))
     return np.asarray(cs, dtype=float), np.asarray(vs, dtype=float)
 
-
-def two_sphere_alpha_from_v(v: float) -> Optional[float]:
-    """``α = R₁/R₀`` from the two-sphere limit ``α³ + (1-α²)^(3/2) = v``."""
-    v = float(v)
-    v_lo = 2.0 ** -0.5
-    if not (v_lo - 1e-9 <= v <= 1.0 + 1e-9):
-        return None
-    if abs(v - v_lo) < 1e-12:
-        return v_lo
-    if abs(v - 1.0) < 1e-12:
-        return 1.0
-
-    def _f(alpha: float) -> float:
-        if alpha <= 0.0 or alpha >= 1.0:
-            return 1e3
-        return alpha ** 3 + (1.0 - alpha * alpha) ** 1.5 - v
-
-    a_eq = v_lo
-    try:
-        if v <= a_eq ** 3 + (1.0 - a_eq * a_eq) ** 1.5 + 1e-12:
-            return float(brentq(_f, 1e-8, a_eq - 1e-8))
-        return float(brentq(_f, a_eq + 1e-8, 1.0 - 1e-8))
-    except ValueError:
-        return None
-
-
-def two_sphere_radii_from_v(v: float, R0: float = 1.0) -> Optional[Tuple[float, float]]:
-    """``(R₁, R₂)`` for area ``4π R₀²`` and volume ``(4π/3) v R₀³`` (thin-neck limit)."""
-    alpha = two_sphere_alpha_from_v(v)
-    if alpha is None:
-        return None
-    r1 = float(alpha * R0)
-    r2 = float(np.sqrt(max(0.0, R0 * R0 - r1 * r1)))
-    return r1, r2
-
-
-def two_sphere_radii_from_AV(A: float, V: float) -> Optional[Tuple[float, float]]:
-    """Two-sphere radii from physical ``(A, V)``.
-
-    Thin-neck limit::
-
-        4π (R₁² + R₂²) = A
-        (4π/3) (R₁³ + R₂³) = V
-
-    Returns ``(R₁, R₂)`` with ``R₁ ≥ R₂ > 0``, or ``None`` if ``v̄`` is
-    outside ``[2^{-1/2}, 1]``.
-    """
-    A = float(A)
-    V = float(V)
-    if A <= 0.0 or V <= 0.0:
-        return None
-    R0 = area_radius(A)
-    v = reduced_volume_from_AV(A, V)
-    radii = two_sphere_radii_from_v(v, R0)
-    if radii is None:
-        return None
-    r1, r2 = float(radii[0]), float(radii[1])
-    if r1 < r2:
-        r1, r2 = r2, r1
-    return r1, r2
-
-
-def nested_sphere_alpha_from_v(v: float) -> Optional[float]:
-    """``α = R_outer/R₀`` for nested spheres: ``|α³ − (1−α²)^{3/2}| = v``.
-
-    Area constraint ``R_outer² + R_inner² = R₀²``.  Reduced volume uses
-    **subtraction** ``|R_outer³ − R_inner³|``, so ``v̄ ∈ (0, 1]`` (equal
-    nested spheres → ``v̄ → 0``).
-    """
-    v = float(v)
-    if not (0.0 < v <= 1.0 + 1e-9):
-        return None
-    if abs(v - 1.0) < 1e-12:
-        return 1.0
-
-    def _f(alpha: float) -> float:
-        if alpha <= 0.0 or alpha >= 1.0:
-            return 1e3
-        return abs(alpha ** 3 - (1.0 - alpha * alpha) ** 1.5) - v
-
-    a_eq = float(2.0 ** -0.5)
-    # Prefer the outer-dominant branch α ≥ 1/√2 (R_outer ≥ R_inner).
-    for lo, hi in ((a_eq + 1e-8, 1.0 - 1e-8), (1e-8, a_eq - 1e-8)):
-        try:
-            flo, fhi = _f(lo), _f(hi)
-            if not (np.isfinite(flo) and np.isfinite(fhi)):
-                continue
-            if flo == 0.0:
-                return float(lo)
-            if flo * fhi < 0.0:
-                return float(brentq(_f, lo, hi))
-        except ValueError:
-            continue
-    return None
-
-
-def nested_sphere_radii_from_v(v: float, R0: float = 1.0) -> Optional[Tuple[float, float]]:
-    """``(R_outer, R_inner)`` > 0 for nested area/volume at reduced ``v̄``."""
-    alpha = nested_sphere_alpha_from_v(v)
-    if alpha is None:
-        return None
-    R0 = float(R0)
-    r_out = float(alpha * R0)
-    r_in = float(np.sqrt(max(0.0, R0 * R0 - r_out * r_out)))
-    if r_out < r_in:
-        r_out, r_in = r_in, r_out
-    return r_out, r_in
-
-
-def nested_sphere_radii_from_AV(A: float, V: float) -> Optional[Tuple[float, float]]:
-    """Nested-sphere radii from physical ``(A, V)`` (volume subtraction)."""
-    A = float(A)
-    V = float(V)
-    if A <= 0.0 or V <= 0.0:
-        return None
-    R0 = area_radius(A)
-    v = reduced_volume_from_AV(A, V)
-    return nested_sphere_radii_from_v(v, R0)
-
-
-def L_sto_reduced_volume(c0: float) -> float:
-    """Analytic stomatocyte limit ``L_sto`` in the ``(c₀, v̄)`` plane.
-
-    .. math::
-
-        \\bar v = -2 c_0^{-3} + (1 - 2 c_0^{-2})\\sqrt{1 + c_0^{-2}}
-    """
-    c0 = float(c0)
-    if abs(c0) < 1e-12:
-        return float("nan")
-    inv2 = 1.0 / (c0 * c0)
-    return float(-2.0 / (c0 ** 3) + (1.0 - 2.0 * inv2) * np.sqrt(1.0 + inv2))
-
-
-def nested_sphere_signed_radii_from_AV(
-    A: float, V: float,
-) -> Optional[Tuple[float, float]]:
-    """``(R_outer > 0, R_inner < 0)`` for nested energy / pressure."""
-    radii = nested_sphere_radii_from_AV(A, V)
-    if radii is None:
-        return None
-    r_out, r_in = float(radii[0]), float(radii[1])
-    if abs(r_out) < abs(r_in):
-        r_out, r_in = r_in, r_out
-    return abs(r_out), -abs(r_in)
-
-
-def nested_sphere_energy(
-    A: float,
-    V: float,
-    C0: float,
-    *,
-    kappa: float = 1.0,
-) -> float:
-    """Helfrich energy of nested spheres at ``(A, V)`` (κ-scaled).
-
-    Uses ``2π[(2−C₀R₁)²+(2−C₀R₂)²]`` with signed inner radius so the
-    invaginated lobe has the correct curvature sign.
-    """
-    signed = nested_sphere_signed_radii_from_AV(A, V)
-    if signed is None:
-        return float("nan")
-    return float(kappa) * approx_pear_energy_two_sphere(C0, signed[0], signed[1])
-
-
-def nested_sphere_pressure_from_dEdV(
-    A: float,
-    V: float,
-    C0: float,
-    *,
-    dV_frac: float = 1e-4,
-    kappa: float = 1.0,
-) -> float:
-    """Growth pressure ``P ≈ −ΔE/ΔV`` at fixed area (nested-sphere energy).
-
-    Decreases volume by a relative ``dV_frac`` and central-differences the
-    nested two-sphere energy.  Returned ``P`` is in the same units as the
-    Božič–Svetina ``ΔP`` / shoot ``P̄`` used by ``bs_growth_step``.
-    """
-    A = float(A)
-    V = float(V)
-    C0 = float(C0)
-    if A <= 0.0 or V <= 0.0:
-        return float("nan")
-    dV_frac = abs(float(dV_frac))
-    if dV_frac < 1e-10:
-        dV_frac = 1e-4
-    V2 = V * (1.0 - dV_frac)
-    if V2 <= 0.0:
-        return float("nan")
-    E1 = nested_sphere_energy(A, V, C0, kappa=kappa)
-    E2 = nested_sphere_energy(A, V2, C0, kappa=kappa)
-    if not (np.isfinite(E1) and np.isfinite(E2)):
-        return float("nan")
-    dV = V2 - V
-    if abs(dV) < 1e-18:
-        return float("nan")
-    return float(-(E2 - E1) / dV)
 
 
 def eta_bozic(
@@ -925,7 +760,7 @@ def build_analytic_bs_sphere(
     P_bar = P_bar_from_DeltaP(DeltaP, R0, kappa=kappa)
     sigma_bar = sphere_sigma_bar_at_radius(C0_dim, P_bar, R0)
     U0, U1, S1 = _sphere_geom_at_area(area)
-    sol = integrate_appendix_b_stage2(
+    sol = integrate_two_leg(
         U0, U1, S1,
         sigma_bar=sigma_bar, P_bar=P_bar, c0=c0,
         branch=branch, n=n, A_c0=area, A1_hint=area, V1_hint=volume,
@@ -1136,7 +971,7 @@ def find_D_by_bending_energy(
     C0_dim: float = 1.0,
     kappa: float = 1.0,
     verbose: bool = False,
-    **stage3_kw: Any,
+    **match_kw: Any,
 ) -> Tuple[MeridianSolution, MeridianSolution, List[Dict[str, float]]]:
     """Locate D at the prolate↔pear bending-energy crossing.
 
@@ -1168,7 +1003,7 @@ def find_D_by_bending_energy(
         min_cv_steps=5,
         verbose=False,
     )
-    kw.update(stage3_kw)
+    kw.update(match_kw)
 
     table: List[Dict[str, float]] = []
 
@@ -1184,7 +1019,7 @@ def find_D_by_bending_energy(
         if first_hop:
             local_kw["min_cv_steps"] = max(int(local_kw.get("min_cv_steps", 5)), 10)
             local_kw["v_step"] = min(float(local_kw.get("v_step", 0.003)), 0.002)
-        pear_try = solve_stage3_from_appendix_b(
+        pear_try = match_AV_from_seed(
             pear_from, float(prol.v), float(prol.c0), A_target=A, **local_kw,
         )
         tau = float(prol.constraints["t_growth"]) / T_d
@@ -2183,10 +2018,10 @@ def step3_stomatocyte_at_D(
     use_cache: bool = True,
     verbose: bool = True,
 ) -> MeridianSolution:
-    """Rescale package stomatocyte seed to D; stage-3 match to landmark D_sto.
+    """Rescale package stomatocyte seed to D; AV-match to landmark D_sto.
 
     The package seed lives at ``c₀=0``.  Unlike pears (where reduced ``c₀`` is
-    preserved by ``C₀→C₀/s``), injecting the growth ``C₀<0`` into stage-2.5 opens
+    preserved by ``C₀→C₀/s``), injecting the growth ``C₀<0`` into the rescaled warm start opens
     the junction.  Here we rescale geometry at **seed** ``c₀``, close the
     junction, then walk carefully in ``(c₀,v̄)`` to D.
     """
@@ -2200,8 +2035,8 @@ def step3_stomatocyte_at_D(
             pwf = {}
 
     A_D = float(D.constraints["A_phys"])
-    sto25 = pwf.get("sto_stage25") if use_cache else None
-    # Require a closed, c₀≈0 warm start (reject old C₀-injected stage-2.5 caches).
+    sto25 = pwf.get("sto_rescaled") if use_cache else None
+    # Require a closed, c₀≈0 warm start (reject old C₀-injected rescaled caches).
     if sto25 is not None:
         res = float(sto25.constraints.get("residual", float("inf")))
         psi = abs(float(sto25.constraints.get("psi_match", 1.0)))
@@ -2210,11 +2045,11 @@ def step3_stomatocyte_at_D(
             or not sto25.success
             or (np.isfinite(res) and res > 1e-4)
             or psi > 1e-3
-            or not _stage25_matches_D(sto25, D)
+            or not _landmark_area_matches(sto25, D)
         ):
             if verbose:
                 print(
-                    "  discarding cached sto_stage25 "
+                    "  discarding cached sto_rescaled "
                     f"(c₀={sto25.c0:.3f}, |res|={res:.3g}, |ψm|={psi:.3g})",
                     flush=True,
                 )
@@ -2230,8 +2065,8 @@ def step3_stomatocyte_at_D(
             )
         from seifert_functions import (
             rescale_pear_params_to_landmark,
-            integrate_appendix_b_stage2,
-            stage2_area,
+            integrate_two_leg,
+            meridian_area,
             solve_seifert,
         )
         params = rescale_pear_params_to_landmark(
@@ -2240,17 +2075,17 @@ def step3_stomatocyte_at_D(
         c0_seed = float(seed.c0)
         if verbose:
             print(
-                f"  stage2.5 rescale: s={params['length_scale']:.4f}  "
+                f"  rescale: s={params['length_scale']:.4f}  "
                 f"A={params['A_source']:.3f}→{A_D:.3f}  "
                 f"S₁={params['S1_source']:.3f}→{params['S1']:.3f}  "
                 f"c₀ kept={c0_seed:g}",
                 flush=True,
             )
-        sto25 = integrate_appendix_b_stage2(
+        sto25 = integrate_two_leg(
             params["U0"], params["U1"], params["S1"],
             sigma_bar=params["sigma_bar"], P_bar=params["P_bar"],
-            c0=c0_seed, branch="stomatocyte_stage25", n=160,
-            enforce_fig16=False, A_c0=A_D,
+            c0=c0_seed, branch="stomatocyte_rescaled", n=160,
+            enforce_branch_filters=False, A_c0=A_D,
             A1_hint=A_D,
             V1_hint=float(seed.constraints.get("V_end", float("nan")))
             * float(params["length_scale"]) ** 3,
@@ -2258,29 +2093,29 @@ def step3_stomatocyte_at_D(
         # Close junction at fixed (v̄, c₀_seed, A_D).
         closed = solve_seifert(
             float(sto25.v), c0_seed, prev=sto25,
-            branch="stomatocyte_stage25",
+            branch="stomatocyte_rescaled",
             use_u0_scan=False, lock_branch=True, u0_window=0.8,
             A_target=A_D, A_c0=A_D, polish=True, verbose=False, max_nfev=160,
         )
         if closed.success and len(closed.s) > 0:
             sto25 = closed
-        sto25 = replace(sto25, branch="stomatocyte_stage25", c0=c0_seed)
+        sto25 = replace(sto25, branch="stomatocyte_rescaled", c0=c0_seed)
         sto25.constraints.update({
             "A_target": A_D, "A_phys": A_D, "length_scale": params["length_scale"],
-            "C0": float(C0), "stage": "2.5", "c0_seed": c0_seed,
+            "C0": float(C0), "pipeline": "rescaled", "c0_seed": c0_seed,
         })
         if verbose:
             print(
-                f"  stage2.5 closed: v̄={sto25.v:.4f} c₀={sto25.c0:.4f}  "
+                f"  rescaled closed: v̄={sto25.v:.4f} c₀={sto25.c0:.4f}  "
                 f"U0={sto25.U0:.4f} U1={sto25.U1:.4f}  "
                 f"|res|={float(sto25.constraints.get('residual', float('nan'))):.2e}  "
                 f"ok={sto25.success}",
                 flush=True,
             )
         if cache is not None:
-            save_bs_workflow(cache, sto_stage25=sto25)
+            save_bs_workflow(cache, sto_rescaled=sto25)
 
-    sto_at_D = pwf.get("sto_stage3") if use_cache else None
+    sto_at_D = pwf.get("sto_matched") if use_cache else None
     if sto_at_D is not None and not _targets_match_D(sto_at_D, D):
         sto_at_D = None
     if sto_at_D is not None:
@@ -2293,14 +2128,14 @@ def step3_stomatocyte_at_D(
         ):
             if verbose:
                 print(
-                    f"  discarding cached sto_stage3 "
+                    f"  discarding cached sto_matched "
                     f"(success={sto_at_D.success}, |res|={res:.3g}, U0={sto_at_D.U0:.3f})",
                     flush=True,
                 )
             sto_at_D = None
     if sto_at_D is None:
         # Careful (c₀,v̄) walk from seed c₀→D with stomatocyte branch gate.
-        sto_at_D = solve_stage3_from_appendix_b(
+        sto_at_D = match_AV_from_seed(
             sto25, float(D.v), float(D.c0),
             A_target=A_D,
             family="stomatocyte",
@@ -2319,21 +2154,21 @@ def step3_stomatocyte_at_D(
         sto_at_D.constraints["landmark"] = "D_sto"
         sto_at_D.constraints["branch_side"] = "stomatocyte"
         if cache is not None and sto_at_D.success:
-            save_bs_workflow(cache, sto_stage3=sto_at_D, sto_stage25=sto25)
+            save_bs_workflow(cache, sto_matched=sto_at_D, sto_rescaled=sto25)
     if not sto_at_D.success:
         if verbose:
             print(
-                "  stomatocyte stage-3 match failed; "
-                "using stage-2.5 warm start at D area "
+                "  stomatocyte AV-match failed; "
+                "using rescaled warm start at D area "
                 f"({sto_at_D.message})",
                 flush=True,
             )
         sto25.constraints["landmark"] = "D_sto"
         sto25.constraints["branch_side"] = "stomatocyte"
-        sto25.constraints["stage3_failed"] = 1.0
-        sto25.constraints["stage3_message"] = str(sto_at_D.message)
+        sto25.constraints["match_failed"] = 1.0
+        sto25.constraints["match_message"] = str(sto_at_D.message)
         if cache is not None:
-            save_bs_workflow(cache, sto_stage25=sto25)
+            save_bs_workflow(cache, sto_rescaled=sto25)
         return sto25
     return sto_at_D
 
@@ -2819,12 +2654,12 @@ def save_bs_workflow(
     *,
     track: Optional[Sequence[MeridianSolution]] = None,
     landmarks: Optional[BSLandmarks] = None,
-    stage2_shapes: Optional[Sequence[MeridianSolution]] = None,
-    stage25: Optional[MeridianSolution] = None,
-    stage3: Optional[MeridianSolution] = None,
-    stage4: Optional[MeridianSolution] = None,
-    sto_stage25: Optional[MeridianSolution] = None,
-    sto_stage3: Optional[MeridianSolution] = None,
+    closed_pears: Optional[Sequence[MeridianSolution]] = None,
+    pear_rescaled: Optional[MeridianSolution] = None,
+    pear_matched: Optional[MeridianSolution] = None,
+    pear_finish: Optional[MeridianSolution] = None,
+    sto_rescaled: Optional[MeridianSolution] = None,
+    sto_matched: Optional[MeridianSolution] = None,
     meta: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Merge Božič–Svetina notebook checkpoints into ``cache_dir/workflow.json``."""
@@ -2857,32 +2692,32 @@ def save_bs_workflow(
                 "V_phys_ref": landmarks.V_phys_ref,
             }
 
-    if stage2_shapes is not None:
-        save_solution_list(cache_dir, "pear_stage2", stage2_shapes)
-        wf["pear_stage2"] = "pear_stage2.json"
+    if closed_pears is not None:
+        save_solution_list(cache_dir, "pear_closed", closed_pears)
+        wf["pear_closed"] = "pear_closed.json"
 
-    if stage25 is not None:
-        save_solution_at(cache_dir / "pear_stage25.json", stage25)
-        wf["pear_stage25"] = "pear_stage25.json"
-        wf["pear_stage25_index"] = int(
-            stage25.constraints.get("stage2_index", wf.get("pear_stage25_index", 0))
+    if pear_rescaled is not None:
+        save_solution_at(cache_dir / "pear_rescaled.json", pear_rescaled)
+        wf["pear_rescaled"] = "pear_rescaled.json"
+        wf["pear_rescaled_index"] = int(
+            pear_rescaled.constraints.get("closed_index", wf.get("pear_rescaled_index", 0))
         )
 
-    if stage3 is not None:
-        save_solution_at(cache_dir / "pear_stage3.json", stage3)
-        wf["pear_stage3"] = "pear_stage3.json"
+    if pear_matched is not None:
+        save_solution_at(cache_dir / "pear_matched.json", pear_matched)
+        wf["pear_matched"] = "pear_matched.json"
 
-    if stage4 is not None:
-        save_solution_at(cache_dir / "pear_stage4.json", stage4)
-        wf["pear_stage4"] = "pear_stage4.json"
+    if pear_finish is not None:
+        save_solution_at(cache_dir / "pear_finish.json", pear_finish)
+        wf["pear_finish"] = "pear_finish.json"
 
-    if sto_stage25 is not None:
-        save_solution_at(cache_dir / "sto_stage25.json", sto_stage25)
-        wf["sto_stage25"] = "sto_stage25.json"
+    if sto_rescaled is not None:
+        save_solution_at(cache_dir / "sto_rescaled.json", sto_rescaled)
+        wf["sto_rescaled"] = "sto_rescaled.json"
 
-    if sto_stage3 is not None:
-        save_solution_at(cache_dir / "sto_stage3.json", sto_stage3)
-        wf["sto_stage3"] = "sto_stage3.json"
+    if sto_matched is not None:
+        save_solution_at(cache_dir / "sto_matched.json", sto_matched)
+        wf["sto_matched"] = "sto_matched.json"
 
     wf_path.write_text(json.dumps(wf, indent=2))
     return wf_path
@@ -2930,59 +2765,30 @@ def load_bs_workflow(
     elif _need("growth_track"):
         raise KeyError("growth_track not in cache")
 
-    if "pear_stage2" in wf:
-        s2_path = cache_dir / wf["pear_stage2"]
-        if s2_path.exists():
-            out["stage2_shapes"] = load_solution_list(s2_path)
-        elif _need("pear_stage2"):
-            raise FileNotFoundError(f"pear_stage2 manifest entry missing: {s2_path}")
-    elif _need("pear_stage2"):
-        raise KeyError("pear_stage2 not in cache")
-
-    if "pear_stage25" in wf:
-        s25_path = cache_dir / wf["pear_stage25"]
-        if s25_path.exists():
-            out["stage25"] = load_solution(s25_path)
-        elif _need("pear_stage25"):
-            raise FileNotFoundError(f"pear_stage25 manifest entry missing: {s25_path}")
-    elif _need("pear_stage25"):
-        raise KeyError("pear_stage25 not in cache")
-
-    if "pear_stage3" in wf:
-        s3_path = cache_dir / wf["pear_stage3"]
-        if s3_path.exists():
-            out["stage3"] = load_solution(s3_path)
-        elif _need("pear_stage3"):
-            raise FileNotFoundError(f"pear_stage3 manifest entry missing: {s3_path}")
-    elif _need("pear_stage3"):
-        raise KeyError("pear_stage3 not in cache")
-
-    if "pear_stage4" in wf:
-        s4_path = cache_dir / wf["pear_stage4"]
-        if s4_path.exists():
-            out["stage4"] = load_solution(s4_path)
-        elif _need("pear_stage4"):
-            raise FileNotFoundError(f"pear_stage4 manifest entry missing: {s4_path}")
-    elif _need("pear_stage4"):
-        raise KeyError("pear_stage4 not in cache")
-
-    if "sto_stage25" in wf:
-        s25_path = cache_dir / wf["sto_stage25"]
-        if s25_path.exists():
-            out["sto_stage25"] = load_solution(s25_path)
-        elif _need("sto_stage25"):
-            raise FileNotFoundError(f"sto_stage25 manifest entry missing: {s25_path}")
-    elif _need("sto_stage25"):
-        raise KeyError("sto_stage25 not in cache")
-
-    if "sto_stage3" in wf:
-        s3_path = cache_dir / wf["sto_stage3"]
-        if s3_path.exists():
-            out["sto_stage3"] = load_solution(s3_path)
-        elif _need("sto_stage3"):
-            raise FileNotFoundError(f"sto_stage3 manifest entry missing: {s3_path}")
-    elif _need("sto_stage3"):
-        raise KeyError("sto_stage3 not in cache")
+    # New checkpoint names with fallbacks for pre-rename caches.
+    _CK = {
+        "pear_closed": ("closed_pears", "pear_stage2", True),
+        "pear_rescaled": ("pear_rescaled", "pear_stage25", False),
+        "pear_matched": ("pear_matched", "pear_stage3", False),
+        "pear_finish": ("pear_finish", "pear_stage4", False),
+        "sto_rescaled": ("sto_rescaled", "sto_stage25", False),
+        "sto_matched": ("sto_matched", "sto_stage3", False),
+    }
+    for new_key, (out_key, old_key, is_list) in _CK.items():
+        rel = wf.get(new_key) or wf.get(old_key)
+        if rel is None:
+            if _need(new_key) or _need(old_key):
+                raise KeyError(f"{new_key} not in cache")
+            continue
+        path = cache_dir / rel
+        if not path.exists():
+            # Manifest may still name the old file after a partial rewrite.
+            alt = cache_dir / f"{old_key}.json"
+            path = alt if alt.exists() else path
+        if path.exists():
+            out[out_key] = load_solution_list(path) if is_list else load_solution(path)
+        elif _need(new_key) or _need(old_key):
+            raise FileNotFoundError(f"{new_key} manifest entry missing: {path}")
 
     return out
 
@@ -3038,9 +2844,9 @@ def _targets_match_D(sol: MeridianSolution, D: MeridianSolution, *, rtol: float 
     )
 
 
-def _stage25_matches_D(stage25: MeridianSolution, D: MeridianSolution, *, rtol: float = 1e-3) -> bool:
+def _landmark_area_matches(pear_rescaled: MeridianSolution, D: MeridianSolution, *, rtol: float = 1e-3) -> bool:
     A_t = float(D.constraints["A_phys"])
-    A_s = float(stage25.constraints.get("A_phys", stage25.constraints.get("A_end", float("nan"))))
+    A_s = float(pear_rescaled.constraints.get("A_phys", pear_rescaled.constraints.get("A_end", float("nan"))))
     return np.isfinite(A_s) and abs(A_s - A_t) / A_t < rtol
 
 
@@ -3182,7 +2988,7 @@ def _pear_seed_for_energy_D(
     verbose: bool = False,
     anchor: Optional[MeridianSolution] = None,
 ) -> MeridianSolution:
-    """Warm pear for the energy-crossing scan (package seed → stage-2.5 at guideline)."""
+    """Warm pear for the energy-crossing scan (package seed → rescaled at guideline)."""
     if anchor is None:
         ok = [s for s in prolates if s.success and len(s.s) > 0]
         if not ok:
@@ -3192,24 +2998,24 @@ def _pear_seed_for_energy_D(
     if anchor is None:
         raise RuntimeError("no prolate anchor for pear energy-D seed")
 
-    # Prefer cached stage-3 / stage-2.5 on this η if they already match.
+    # Prefer cached matched / rescaled on this η if they already match.
     try:
         pwf = load_bs_workflow(cache)
     except FileNotFoundError:
         pwf = {}
-    stage3 = pwf.get("stage3")
-    if stage3 is not None and stage3.success and len(stage3.s) > 0 and _targets_match_D(stage3, anchor, rtol=0.02):
-        return stage3
-    pear25 = pwf.get("stage25")
-    if pear25 is not None and _stage25_matches_D(pear25, anchor):
+    pear_matched = pwf.get("pear_matched")
+    if pear_matched is not None and pear_matched.success and len(pear_matched.s) > 0 and _targets_match_D(pear_matched, anchor, rtol=0.02):
+        return pear_matched
+    pear25 = pwf.get("pear_rescaled")
+    if pear25 is not None and _landmark_area_matches(pear25, anchor):
         return pear25
 
     seed = load_pear_seed()
     if verbose:
         print(f"  pear seed ← {resolve_pear_seed_path().name}", flush=True)
-    pear25 = integrate_stage25_pear_at_D(seed, anchor, C0=C0, verbose=verbose)
+    pear25 = integrate_pear_at_landmark(seed, anchor, C0=C0, verbose=verbose)
     if use_cache:
-        save_bs_workflow(cache, stage25=pear25)
+        save_bs_workflow(cache, pear_rescaled=pear25)
     return pear25
 
 
@@ -3424,10 +3230,10 @@ def _select_D_from_track(
                     verbose=verbose,
                 )
                 if use_cache and pear_at_D.success and _targets_match_D(pear_at_D, D):
-                    save_bs_workflow(cache, stage3=pear_at_D)
+                    save_bs_workflow(cache, pear_matched=pear_at_D)
                     if verbose:
                         print(
-                            "  energy-D: cached crossing pear as stage-3 "
+                            "  energy-D: cached crossing pear as matched "
                             "(step3 will reuse)",
                             flush=True,
                         )
@@ -3499,28 +3305,28 @@ def step3_pear_at_D(
     except FileNotFoundError:
         pwf = {}
 
-    pear25 = pwf.get("stage25") if use_cache else None
-    if not (pear25 is not None and _stage25_matches_D(pear25, D)):
+    pear25 = pwf.get("pear_rescaled") if use_cache else None
+    if not (pear25 is not None and _landmark_area_matches(pear25, D)):
         seed = load_pear_seed()
         if verbose:
             print(f"  pear seed ← {resolve_pear_seed_path().name} → D", flush=True)
-        pear25 = integrate_stage25_pear_at_D(seed, D, C0=C0, verbose=verbose)
+        pear25 = integrate_pear_at_landmark(seed, D, C0=C0, verbose=verbose)
         if use_cache:
-            save_bs_workflow(cache, stage25=pear25)
+            save_bs_workflow(cache, pear_rescaled=pear25)
 
-    pear_at_D = pwf.get("stage3") if use_cache else None
+    pear_at_D = pwf.get("pear_matched") if use_cache else None
     if pear_at_D is not None and not _targets_match_D(pear_at_D, D):
         pear_at_D = None
     if pear_at_D is None:
-        pear_at_D = solve_stage3_from_appendix_b(
+        pear_at_D = match_AV_from_seed(
             pear25, float(D.v), float(D.c0),
             A_target=float(D.constraints["A_phys"]),
             u0_window=0.35, v_step=0.004, min_cv_steps=25, verbose=verbose,
         )
         if use_cache:
-            save_bs_workflow(cache, stage3=pear_at_D, stage25=pear25)
+            save_bs_workflow(cache, pear_matched=pear_at_D, pear_rescaled=pear25)
     if not pear_at_D.success:
-        raise RuntimeError("pear stage-3 match at D failed")
+        raise RuntimeError("pear AV-match at D failed")
     return pear_at_D
 
 
@@ -3826,82 +3632,7 @@ def step5_full_track(
     return full
 
 
-def save_growth_plots(
-    full: Sequence[MeridianSolution],
-    landmarks: BSLandmarks,
-    D: MeridianSolution,
-    *,
-    eta: float,
-    T_d: float = 1.0,
-    out_dir: Path,
-) -> Path:
-    """Area/volume vs τ and path in (c₀, v̄); save ``growth_path.png`` under *out_dir*."""
-    ok = [s for s in full if s.success]
-    A0, V0 = landmarks.A_phys_ref, landmarks.V_phys_ref
-    ts = np.array([s.constraints["t_growth"] for s in ok]) / T_d
-    As = np.array([s.constraints["A_phys"] / A0 for s in ok])
-    Vs = np.array([s.constraints["V_phys"] / V0 for s in ok])
-    vs = np.array([s.v for s in ok])
-    cs = np.array([s.c0 for s in ok])
-    phases = [s.constraints.get("phase") for s in ok]
-    C0_CR = c0_critical_sphere(eta)
-    pear_D = ok[0]
-    for s in ok:
-        if abs(float(s.constraints.get("t_growth", 0.0)) - float(D.constraints["t_growth"])) < 1e-8:
-            pear_D = s
-            break
-    pear_E = min(ok, key=lambda s: abs(s.constraints["t_growth"] / T_d - 1.0))
-
-    landmark_lines = (
-        ("B", landmarks.B), ("C", landmarks.C), ("D", pear_D), ("E", pear_E),
-    )
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-
-    ax = axes[0]
-    ax.plot(ts, As, "o-", ms=3, label=r"$A/A_0$")
-    ax.plot(ts, Vs, "s-", ms=3, label=r"$V/V_0$")
-    ax.axhline(2.0, color="k", ls="--", lw=0.8, alpha=0.4)
-    ax.axhline(np.sqrt(2.0), color="k", ls=":", lw=0.8, alpha=0.4)
-    ymax = max(As.max(), Vs.max()) * 1.05
-    for name, sol in landmark_lines:
-        if sol is None:
-            continue
-        t = sol.constraints["t_growth"] / T_d
-        ax.axvline(t, color="C3", ls="--", lw=0.7, alpha=0.7)
-        ax.text(t, ymax, name, ha="center", va="bottom", fontsize=8, color="C3")
-    ax.set_xlabel(r"$\tau = t/T_d$")
-    ax.set_ylabel("normalized")
-    ax.set_title(rf"Growth curves ($\eta={eta:g}$)")
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1]
-    for phase, marker in (("sphere", "o"), ("shape", "s")):
-        m = np.array([p == phase for p in phases])
-        if m.any():
-            ax.plot(cs[m], vs[m], marker + "-", ms=4, lw=1, label=phase)
-    for name, sol in landmark_lines:
-        if sol is None:
-            continue
-        ax.plot(sol.c0, sol.v, "*", ms=12)
-        ax.annotate(name, (sol.c0, sol.v), textcoords="offset points", xytext=(5, 5), fontsize=9)
-    ax.axvline(C0_CR, color="C3", ls=":", lw=0.8, alpha=0.6, label=rf"$c_{{0,\mathrm{{cr}}}}={C0_CR:.3f}$")
-    ax.axhline(BS_V_TWO_SPHERE, color="0.5", ls=":", lw=0.8, alpha=0.6)
-    ax.plot([BS_C0_START, BS_C0_END], [1.0, BS_V_TWO_SPHERE], "k--", lw=0.6, alpha=0.3)
-    ax.set_xlabel(r"$c_0 = C_0 R$")
-    ax.set_ylabel(r"$\bar v$")
-    ax.set_title(r"Path in $(c_0, \bar v)$")
-    ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(0.65, 1.02)
-
-    fig.tight_layout()
-    out_path = Path(out_dir) / "growth_path.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    return out_path
-
+# Plotting: see bs_plotting.save_growth_plots
 
 # ===== Two-sphere finish + full assembly =====
 
@@ -4051,46 +3782,7 @@ def load_seifert_context(
     }
 
 
-def _match_sol_by_tau(
-    sols: Sequence[MeridianSolution],
-    tau: float,
-    *,
-    T_d: float = T_D,
-    tol: float = 5e-5,
-) -> Optional[MeridianSolution]:
-    best: Optional[MeridianSolution] = None
-    best_dt = float("inf")
-    for sol in sols:
-        dt = abs(_seifert_tau(sol, T_d=T_d) - float(tau))
-        if dt < best_dt:
-            best_dt = dt
-            best = sol
-    return best if best_dt <= tol else None
-
-
-def attach_seifert_sols(
-    frames: Sequence[TrajFrame],
-    cache: Optional[Path] = None,
-    *,
-    T_d: float = T_D,
-) -> None:
-    """Attach ``MeridianSolution`` profiles for movie/plot-only reload."""
-    try:
-        ctx = load_seifert_context(cache if cache is not None else CACHE, T_d=T_d)
-    except RuntimeError:
-        return
-    sols = ctx["seifert_tr"]
-    for fr in frames:
-        if fr.phase not in ("prolate", "pear"):
-            continue
-        sol = _match_sol_by_tau(sols, fr.tau, T_d=T_d)
-        if sol is not None:
-            fr.sol = sol
-
-
-# ---------------------------------------------------------------------------
-# Two-sphere continuation
-# ---------------------------------------------------------------------------
+# Plotting helpers: see bs_plotting.attach_seifert_sols
 
 def fit_P_bar_linear(
     taus: Sequence[float],
@@ -4128,60 +3820,6 @@ def fit_P_bar_linear(
     return P_of_tau, meta
 
 
-def two_sphere_meridian(R1: float, R2: float, *, n_per: int = 80) -> Tuple[np.ndarray, np.ndarray]:
-    """Side-view meridian: two circles stacked on ``z``, touching at the neck.
-
-    Continuous walk: north pole → neck → south pole (no jump).
-    ``R1`` = north lobe, ``R2`` = south lobe (not sorted by size).
-    """
-    R1, R2 = float(R1), float(R2)
-    th1 = np.linspace(0.0, np.pi, n_per)
-    # North lobe, center at +R1: th=0 north pole (z=2R1), th=π neck (z=0).
-    x1 = R1 * np.sin(th1)
-    z1 = R1 * np.cos(th1) + R1
-    th2 = np.linspace(0.0, np.pi, n_per)
-    # South lobe, center at -R2: th=0 neck (z=0), th=π south pole (z=-2R2).
-    x2 = R2 * np.sin(th2)
-    z2 = R2 * np.cos(th2) - R2
-    x = np.concatenate([x1, x2[1:]])
-    z = np.concatenate([z1, z2[1:]])
-    z = z - 0.5 * (z.max() + z.min())
-    return x, z
-
-
-def orient_two_sphere_radii(
-    R_a: float,
-    R_b: float,
-    *,
-    U0: Optional[float] = None,
-    U1: Optional[float] = None,
-    north_larger: Optional[bool] = None,
-) -> Tuple[float, float]:
-    """Order ``(R_north, R_south)`` to match pear pole orientation.
-
-    ``two_sphere_radii_from_AV`` returns ``R_big ≥ R_small``.  Pear tips at
-    η=1.85 have the *smaller* lobe at the north pole (``|U0| > |U1|``), so we
-    flip unless ``north_larger`` / tip curvatures say otherwise.
-    """
-    ra, rb = float(R_a), float(R_b)
-    r_big, r_small = (ra, rb) if ra >= rb else (rb, ra)
-    if north_larger is None:
-        if U0 is not None and U1 is not None and abs(U0) > 1e-14 and abs(U1) > 1e-14:
-            # Larger |U| ⇒ smaller radius at that pole.
-            north_larger = abs(float(U0)) < abs(float(U1))
-        else:
-            north_larger = True  # legacy: R1 ≥ R2
-    if north_larger:
-        return r_big, r_small
-    return r_small, r_big
-
-
-def sphere_meridian(R: float, *, n: int = 80) -> Tuple[np.ndarray, np.ndarray]:
-    th = np.linspace(0.0, np.pi, n)
-    x = float(R) * np.sin(th)
-    z = float(R) * np.cos(th)
-    return x, z
-
 
 def make_two_sphere_frame(
     *,
@@ -4199,192 +3837,17 @@ def make_two_sphere_frame(
     tip_U0: Optional[float] = None,
     tip_U1: Optional[float] = None,
 ) -> MeridianSolution:
-    """Build a lightweight ``MeridianSolution`` from two-sphere radii."""
+    """Build a lightweight ``MeridianSolution`` via ``shapes.TwoSphere``."""
     if eta is None:
         eta = ETA
-    radii = two_sphere_radii_from_AV(A, V)
-    if radii is None:
-        raise ValueError(f"two-sphere radii failed at A={A:.4f} V={V:.4f}")
-    R1, R2 = orient_two_sphere_radii(
-        radii[0], radii[1],
-        U0=tip_U0, U1=tip_U1, north_larger=north_larger,
+    shape = TwoSphere(
+        A, V, C0_dim,
+        north_larger=north_larger, tip_U0=tip_U0, tip_U1=tip_U1,
     )
-    U0, U1 = 1.0 / R1, 1.0 / R2
-    v = reduced_volume_from_AV(A, V)
-    c0 = c0_reduced(C0_dim, A)
-    X, Z = two_sphere_meridian(R1, R2)
-    n = X.size
-    y = np.zeros((7, n), dtype=float)
-    y[0] = X
-    y[1] = Z
-    y[3, 0] = U0
-    y[3, -1] = U1
-    y[5, -1] = A
-    y[6, -1] = V
-    s = np.linspace(0.0, float(np.pi * (R1 + R2)), n)
-    return MeridianSolution(
-        v=float(v),
-        c0=float(c0),
-        U0=float(U0),
-        U1=float(U1),
-        sigma_bar=float("nan"),
-        P_bar=float(P_bar),
-        s=s,
-        y=y,
-        branch="two_sphere",
-        success=True,
-        message=message,
-        constraints={
-            "A_phys": float(A),
-            "V_phys": float(V),
-            "t_growth": float(t_growth),
-            "R1": float(R1),
-            "R2": float(R2),
-            "C0_dimensional": float(C0_dim),
-            "T_d": float(T_d),
-            "L_p": float(L_p),
-            "eta": float(eta),
-            "kappa": float(kappa),
-            "phase": "two_sphere",
-            "DeltaP": float(P_bar),
-            "north_larger": bool(R1 >= R2),
-        },
-        S1=float(np.pi * R1),
-        S_bar=float(np.pi * R1),
+    return shape.to_meridian_solution(
+        t_growth=t_growth, P_bar=P_bar, L_p=L_p, T_d=T_d,
+        eta=eta, kappa=kappa, message=message,
     )
-
-
-def continue_two_sphere_to_E(
-    *,
-    A0: float,
-    V0: float,
-    t0: float,
-    P_of_tau: Callable[[float], float],
-    T_d: float = T_D,
-    C0_dim: float = C0,
-    eta: Optional[float] = None,
-    kappa: float = KAPPA,
-    dt: float = DT,
-    tau_stop: float = 1.0,
-    verbose: bool = True,
-    tip_U0: Optional[float] = None,
-    tip_U1: Optional[float] = None,
-) -> List[MeridianSolution]:
-    """Advance ``(A,V)`` with BS ODEs + linear ``P̄(τ)``; shapes are two-spheres."""
-    if eta is None:
-        eta = ETA
-    L_p = float(L_p_from_eta(eta, T_d, C0_dim, kappa))
-    alpha = alpha_from_T_d(T_d)
-    # Lock lobe orientation to the pear tip for the whole finish leg.
-    if tip_U0 is not None and tip_U1 is not None:
-        north_larger = abs(float(tip_U0)) < abs(float(tip_U1))
-    else:
-        north_larger = None
-    A, V, t = float(A0), float(V0), float(t0)
-    try:
-        first = make_two_sphere_frame(
-            A=A, V=V, t_growth=t, P_bar=P_of_tau(t / T_d),
-            C0_dim=C0_dim, T_d=T_d, L_p=L_p, eta=eta, kappa=kappa,
-            message="two-sphere @ τ_fail",
-            north_larger=north_larger,
-            tip_U0=tip_U0, tip_U1=tip_U1,
-        )
-    except ValueError as exc:
-        if verbose:
-            print(
-                f"  no two-sphere leg: {exc} at τ={t/T_d:.6f} "
-                f"(pear cutoff already below v̄={BS_V_TWO_SPHERE:.6f}); "
-                f"ending simulation and plotting up to cutoff.",
-                flush=True,
-            )
-        return []
-    track: List[MeridianSolution] = [first]
-    if verbose:
-        fr0 = track[0]
-        print(
-            f"  two-sphere start: τ={t/T_d:.6f} A={A:.4f} V={V:.4f} v̄={fr0.v:.6f}  "
-            f"R1(N)={fr0.constraints['R1']:.4f} R2(S)={fr0.constraints['R2']:.4f}  "
-            f"U0={fr0.U0:.4f} U1={fr0.U1:.4f}  P̄={fr0.P_bar:.4f}",
-            flush=True,
-        )
-
-    i = 0
-    while t / T_d < tau_stop - 1e-12:
-        dt_cur = min(dt, tau_stop * T_d - t)
-        tau_mid = (t + 0.5 * dt_cur) / T_d
-        P = float(P_of_tau(tau_mid))
-        A_new, V_new = bs_growth_step(A, V, dt_cur, alpha=alpha, L_p=L_p, P=P)
-        t_new = t + dt_cur
-        v_new = reduced_volume_from_AV(A_new, V_new)
-        hit_E = v_new <= BS_V_TWO_SPHERE + 1e-12
-        if hit_E:
-            R0 = (A_new / (4.0 * np.pi)) ** 0.5
-            V_E = (4.0 * np.pi / 3.0) * BS_V_TWO_SPHERE * R0 ** 3
-            V_new = float(V_E)
-        try:
-            fr = make_two_sphere_frame(
-                A=A_new, V=V_new, t_growth=t_new, P_bar=P_of_tau(t_new / T_d),
-                C0_dim=C0_dim, T_d=T_d, L_p=L_p, eta=eta, kappa=kappa,
-                message=(
-                    "two-sphere @ E (clamped)"
-                    if hit_E
-                    else f"two-sphere step {i+1}"
-                ),
-                north_larger=north_larger,
-                tip_U0=tip_U0, tip_U1=tip_U1,
-            )
-        except ValueError as exc:
-            if verbose:
-                print(f"  stop: {exc} at τ→{t_new/T_d:.6f}", flush=True)
-            break
-        track.append(fr)
-        A, V, t = A_new, V_new, t_new
-        i += 1
-        if verbose and (i % 20 == 0 or t / T_d > tau_stop - 0.002 or hit_E):
-            print(
-                f"  [{i}] τ={t/T_d:.6f} A={A:.4f} v̄={fr.v:.6f}  "
-                f"R1(N)={fr.constraints['R1']:.4f} R2(S)={fr.constraints['R2']:.4f}  "
-                f"P̄={fr.P_bar:.4f} U0={fr.U0:.4f} U1={fr.U1:.4f}",
-                flush=True,
-            )
-        if hit_E:
-            if verbose:
-                print(
-                    f"  reached equal-sphere limit v̄={BS_V_TWO_SPHERE:.6f} "
-                    f"at τ={t/T_d:.6f} (target τ=1); stopping.",
-                    flush=True,
-                )
-            break
-    return track
-
-
-def nested_sphere_meridian(
-    R_out: float,
-    R_in: float,
-    *,
-    n_per: int = 80,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Side-view meridian for nested spheres (stomatocyte thin-neck limit).
-
-    Outer and inner circles share a neck on the axis at ``z=0``, both centers
-    on the south side.  Walk: outer south pole → neck → inner south pole
-    (invagination).  ``R_in`` may be signed; absolute values are used for
-    geometry.
-    """
-    Ro = abs(float(R_out))
-    Ri = abs(float(R_in))
-    # Outer: south pole (θ=π) → neck (θ=0), center at z=-Ro.
-    th_o = np.linspace(np.pi, 0.0, n_per)
-    x_o = Ro * np.sin(th_o)
-    z_o = -Ro + Ro * np.cos(th_o)
-    # Inner (invaginated): neck (θ=0) → inner pole (θ=π), center at z=-Ri.
-    th_i = np.linspace(0.0, np.pi, n_per)
-    x_i = Ri * np.sin(th_i)
-    z_i = -Ri + Ri * np.cos(th_i)
-    x = np.concatenate([x_o, x_i[1:]])
-    z = np.concatenate([z_o, z_i[1:]])
-    z = z - 0.5 * (z.max() + z.min())
-    return x, z
 
 
 def make_nested_sphere_frame(
@@ -4400,63 +3863,15 @@ def make_nested_sphere_frame(
     kappa: float = KAPPA,
     message: str = "nested-sphere",
 ) -> MeridianSolution:
-    """Build a lightweight ``MeridianSolution`` from nested-sphere radii."""
+    """Build a lightweight ``MeridianSolution`` via ``shapes.NestedSphere``."""
     if eta is None:
         eta = ETA
-    signed = nested_sphere_signed_radii_from_AV(A, V)
-    if signed is None:
-        raise ValueError(f"nested-sphere radii failed at A={A:.4f} V={V:.4f}")
-    R_out, R_in_signed = float(signed[0]), float(signed[1])
-    R_in = abs(R_in_signed)
-    # Curvatures: outer positive mean-ish U~1/R; inner inverted → negative U.
-    U0 = -1.0 / R_in if R_in > 1e-14 else 0.0
-    U1 = 1.0 / R_out if R_out > 1e-14 else 0.0
-    v = reduced_volume_from_AV(A, V)
-    c0 = c0_reduced(C0_dim, A)
-    X, Z = nested_sphere_meridian(R_out, R_in)
-    n = X.size
-    y = np.zeros((7, n), dtype=float)
-    y[0] = X
-    y[1] = Z
-    y[3, 0] = U0
-    y[3, -1] = U1
-    y[5, -1] = A
-    y[6, -1] = V
-    s = np.linspace(0.0, float(np.pi * (R_out + R_in)), n)
-    E = nested_sphere_energy(A, V, C0_dim, kappa=kappa)
-    return MeridianSolution(
-        v=float(v),
-        c0=float(c0),
-        U0=float(U0),
-        U1=float(U1),
-        sigma_bar=float("nan"),
-        P_bar=float(P_bar),
-        s=s,
-        y=y,
-        branch="nested_sphere",
-        success=True,
-        message=message,
-        constraints={
-            "A_phys": float(A),
-            "V_phys": float(V),
-            "t_growth": float(t_growth),
-            "R_outer": float(R_out),
-            "R_inner": float(R_in_signed),
-            "R1": float(R_out),
-            "R2": float(R_in_signed),
-            "C0_dimensional": float(C0_dim),
-            "T_d": float(T_d),
-            "L_p": float(L_p),
-            "eta": float(eta),
-            "kappa": float(kappa),
-            "phase": "nested_sphere",
-            "DeltaP": float(P_bar),
-            "E_nested": float(E),
-            "v_L_sto": float(L_sto_reduced_volume(c0)),
-        },
-        S1=float(np.pi * R_out),
-        S_bar=float(np.pi * R_out),
+    shape = NestedSphere(A, V, C0_dim)
+    return shape.to_meridian_solution(
+        t_growth=t_growth, P_bar=P_bar, L_p=L_p, T_d=T_d,
+        eta=eta, kappa=kappa, message=message,
     )
+
 
 
 def continue_nested_sphere_to_L_sto(
@@ -4987,444 +4402,7 @@ def ensure_two_sphere_leg(
 # Plots
 # ---------------------------------------------------------------------------
 
-PHASE_COLORS = {
-    "sphere": "#2e7d32",
-    "prolate": "#1f4e79",
-    "pear": "#8b3a3a",
-    "two_sphere": "#c45c26",
-    "oblate": "#1f4e79",
-    "stomatocyte": "#8b3a3a",
-    "nested_sphere": "#c45c26",
-}
-
-
-def _phase_segments(full: Sequence[TrajFrame]) -> List[Tuple[str, List[TrajFrame]]]:
-    if not full:
-        return []
-    segs: List[Tuple[str, List[TrajFrame]]] = []
-    cur_phase = full[0].phase
-    cur: List[TrajFrame] = [full[0]]
-    for fr in full[1:]:
-        if fr.phase != cur_phase:
-            segs.append((cur_phase, cur))
-            cur = [cur[-1], fr]
-            cur_phase = fr.phase
-        else:
-            cur.append(fr)
-    segs.append((cur_phase, cur))
-    return segs
-
-
-def plot_full_trajectory(
-    full: Sequence[TrajFrame],
-    out_dir: Path,
-    *,
-    eta: Optional[float] = None,
-    C0_dim: float = C0,
-    tau_D: Optional[float] = None,
-    tau_fail: Optional[float] = None,
-    stem: str = "full_trajectory",
-) -> Path:
-    """``(c₀,v̄)``, pressure, and doubling for the assembled growth track."""
-    if eta is None:
-        eta = ETA
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    neg = float(C0_dim) < 0.0
-    c0_start = BS_C0_START_NEG if neg else BS_C0_START
-    ref = bs_point_a_ref(C0_dim, c0_start=c0_start)
-    A0, V0 = float(ref["A"]), float(ref["V"])
-    c0_cr = float(c0_critical_sphere(eta, side="-" if neg else "+"))
-    tau_B = float(tau_B_from_eta(eta, c0_start=c0_start))
-
-    if tau_D is None:
-        if neg:
-            nested = [f for f in full if f.phase == "nested_sphere"]
-            sto = [f for f in full if f.phase == "stomatocyte"]
-            obl = [f for f in full if f.phase == "oblate"]
-            if nested:
-                tau_D = float(nested[0].tau)
-            elif sto:
-                tau_D = float(sto[0].tau)
-            elif obl:
-                tau_D = float(obl[-1].tau)
-            else:
-                tau_D = float(full[-1].tau)
-        else:
-            try:
-                tau_D = float(load_seifert_context()["tau_D"])
-            except RuntimeError:
-                tau_D = float(BS_TAU_D_REF)
-    if tau_fail is None:
-        two_ph = [f for f in full if f.phase == "two_sphere"]
-        pear_ph = [f for f in full if f.phase == "pear"]
-        if two_ph and pear_ph:
-            tau_fail = float(pear_ph[-1].tau)
-        elif two_ph:
-            tau_fail = float(two_ph[0].tau)
-        else:
-            tau_fail = float(full[-1].tau)
-
-    ts = np.array([fr.tau for fr in full])
-    As = np.array([fr.A / A0 for fr in full])
-    Vs = np.array([fr.V / V0 for fr in full])
-    segs = _phase_segments(full)
-    # "fail" = early Seifert handoff to two-sphere; omit when the Seifert leg
-    # itself runs to the trajectory endpoint (no thin-neck cutoff).
-    early_fail = (
-        (not neg)
-        and float(tau_fail) < float(full[-1].tau) - 1e-3
-        and float(tau_fail) < 1.0 - 1e-3
-    )
-    d_label = "D" if not neg else r"$D_{\mathrm{sto}}$"
-    marks = [
-        ("A", full[0]),
-        ("B", min(full, key=lambda f: abs(f.tau - tau_B))),
-        (d_label, min(full, key=lambda f: abs(f.tau - tau_D))),
-    ]
-    if early_fail:
-        marks.append(("fail", min(full, key=lambda f: abs(f.tau - tau_fail))))
-    end_label = r"$L_{\mathrm{sto}}$" if neg else "E"
-    marks.append((end_label, full[-1]))
-
-    tau_hi = max(1.0, float(full[-1].tau) * 1.02)
-    fig, axes = plt.subplots(2, 3, figsize=(14.5, 8.0))
-
-    def _phase_lines(ax, xattr: str, yattr: str) -> None:
-        for phase, seg in segs:
-            ax.plot(
-                [getattr(f, xattr) for f in seg],
-                [getattr(f, yattr) for f in seg],
-                "-", color=PHASE_COLORS.get(phase, "k"), lw=2.0,
-                label=phase.replace("_", "-"),
-            )
-
-    tau_guides = [tau_B, tau_D] + ([tau_fail] if early_fail else [])
-
-    ax = axes[0, 0]
-    _phase_lines(ax, "tau", "c0")
-    ax.axhline(c0_cr, color="0.45", ls=":", lw=0.9, alpha=0.7)
-    if not neg:
-        ax.axhline(BS_C0_END, color="0.45", ls="--", lw=0.8, alpha=0.5)
-    for tmark in tau_guides:
-        ax.axvline(tmark, color="0.5", ls=":", lw=0.8, alpha=0.5)
-    ax.set_xlabel(r"$\tau$"); ax.set_ylabel(r"$c_0$"); ax.set_title(r"$c_0(\tau)$")
-    ax.legend(fontsize=7, loc="best"); ax.grid(True, alpha=0.3); ax.set_xlim(0.0, tau_hi)
-
-    ax = axes[0, 1]
-    _phase_lines(ax, "tau", "v")
-    ax.axhline(BS_V_TWO_SPHERE, color="0.45", ls=":", lw=0.9, alpha=0.7,
-               label=rf"$2^{{-1/2}}$")
-    for tmark in tau_guides:
-        ax.axvline(tmark, color="0.5", ls=":", lw=0.8, alpha=0.5)
-    ax.set_xlabel(r"$\tau$"); ax.set_ylabel(r"$v$"); ax.set_title(r"$v(\tau)$")
-    ax.legend(fontsize=7); ax.grid(True, alpha=0.3); ax.set_xlim(0.0, tau_hi)
-    v_min = min(float(fr.v) for fr in full)
-    ax.set_ylim(min(0.65, v_min - 0.03), 1.02)
-
-    ax = axes[0, 2]
-    _phase_lines(ax, "tau", "P")
-    for tmark in tau_guides:
-        ax.axvline(tmark, color="0.5", ls=":", lw=0.8, alpha=0.5)
-    ax.axhline(0.0, color="0.4", ls="--", lw=0.7, alpha=0.5)
-    ax.set_xlabel(r"$\tau$"); ax.set_ylabel(r"$P$"); ax.set_title(r"Pressure $P(\tau)$")
-    ax.legend(fontsize=7); ax.grid(True, alpha=0.3); ax.set_xlim(0.0, tau_hi)
-
-    ax = axes[1, 0]
-    _phase_lines(ax, "v", "c0")
-    if neg:
-        ax.plot(
-            [1.0, BS_V_TWO_SPHERE], [BS_C0_START_NEG, -BS_C0_END],
-            "k--", lw=0.7, alpha=0.35, label="sphere→E line",
-        )
-        c0_lo = min(float(fr.c0) for fr in full)
-        c0_hi = float(BS_C0_START_NEG)
-        # Span past the trajectory tip so the guideline stays visible at L_sto.
-        c0_end = min(c0_lo - 0.4, -4.0, float(c0_cr) * 1.5)
-        c0_grid = np.linspace(c0_hi, c0_end, 121)
-        c_mid, v_mid = approx_D_boundary_curve(c0_grid, C0=C0_dim, delta_target=0.0)
-        bound_label = r"approx $E_{\mathrm{sto}}=E_{\mathrm{oblate}}$"
-        # Analytic L_sto curve.
-        c_L = np.linspace(min(c0_hi, -0.5), c0_end, 161)
-        v_L = np.array([L_sto_reduced_volume(c) for c in c_L], dtype=float)
-        ok_L = np.isfinite(v_L) & (v_L > 0.0) & (v_L < 1.0)
-        if np.any(ok_L):
-            ax.plot(
-                v_L[ok_L], c_L[ok_L], "-", color="#6b3fa0", lw=1.6, alpha=0.85,
-                label=r"$L_{\mathrm{sto}}$", zorder=2,
-            )
-    else:
-        ax.plot([1.0, BS_V_TWO_SPHERE], [BS_C0_START, BS_C0_END],
-                "k--", lw=0.7, alpha=0.35, label="sphere→E line")
-        c0_grid = np.linspace(BS_C0_START, BS_C0_END, 81)
-        c_mid, v_mid = approx_D_boundary_curve(c0_grid, C0=C0_dim, delta_target=0.0)
-        bound_label = r"approx $E_{\mathrm{pear}}=E_{\mathrm{prolate}}$"
-    if c_mid.size:
-        ax.plot(
-            v_mid, c_mid, "-", color="#b8860b", lw=1.8, alpha=0.9,
-            label=bound_label,
-            zorder=2,
-        )
-    ax.axhline(c0_cr, color="0.45", ls=":", lw=0.9, alpha=0.7)
-    ax.axvline(BS_V_TWO_SPHERE, color="0.45", ls=":", lw=0.9, alpha=0.5)
-    for name, fr in marks:
-        ax.plot(fr.v, fr.c0, "*", ms=11, color="k", zorder=5)
-        ax.annotate(name, (fr.v, fr.c0), textcoords="offset points",
-                    xytext=(5, 5), fontsize=8)
-    ax.set_xlabel(r"$v$"); ax.set_ylabel(r"$c_0$")
-    ax.set_title(r"Path in $(v,c_0)$")
-    ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
-    v_min = min(float(fr.v) for fr in full)
-    ax.set_xlim(min(0.65, v_min - 0.03), 1.02)
-
-    ax = axes[1, 1]
-    ax.plot(ts, As, "-", color="#1f4e79", lw=2.0, label=r"$A/A_0$")
-    ax.plot(ts, Vs, "--", color="#1f4e79", lw=1.5, alpha=0.75, label=r"$V/V_0$")
-    ax.axhline(2.0, color="k", ls="--", lw=0.9, alpha=0.45)
-    ax.axhline(np.sqrt(2.0), color="k", ls=":", lw=0.9, alpha=0.4)
-    av_labels = [("B", tau_B), ("D" if not neg else r"$D_{\mathrm{sto}}$", tau_D)]
-    if early_fail:
-        av_labels.append(("fail", tau_fail))
-    else:
-        av_labels.append(
-            (r"$L_{\mathrm{sto}}$" if neg else "E", float(full[-1].tau))
-        )
-    for lab, tmark in av_labels:
-        ax.axvline(tmark, color="0.5", ls=":", lw=0.8, alpha=0.5)
-        ax.text(tmark, 0.02, lab, transform=ax.get_xaxis_transform(),
-                ha="center", va="bottom", fontsize=7, color="0.35")
-    ax.set_xlabel(r"$\tau$"); ax.set_ylabel("normalized")
-    ax.set_title(r"Area / volume doubling")
-    ax.legend(fontsize=7, loc="upper left"); ax.grid(True, alpha=0.3); ax.set_xlim(0.0, tau_hi)
-
-    ax = axes[1, 2]
-    ax.axis("off")
-    if neg:
-        phase_blurb = (
-            "phases:\n"
-            "  green  sphere A→B\n"
-            "  blue   Seifert oblate B→D_sto\n"
-            "  maroon stomatocyte D_sto→L_sto\n\n"
-        )
-        title = (
-            rf"Negative-$C_0$ BS trajectory "
-            rf"($\eta={eta:g}$, $C_0={C0_dim:g}$)"
-        )
-    else:
-        pear_line = (
-            "  maroon Seifert pear D→fail\n"
-            if early_fail
-            else "  maroon Seifert pear D→E\n"
-        )
-        phase_blurb = (
-            "phases:\n"
-            "  green  sphere A→B\n"
-            "  blue   Seifert prolate B→D\n"
-            + pear_line
-            + "  orange two-sphere →E\n\n"
-        )
-        title = (
-            rf"Full BS trajectory $\tau=0\to 1$ "
-            rf"(sphere + Seifert + two-sphere, $\eta={eta:g}$)"
-        )
-    summary = (
-        rf"$\eta={eta:g}$" + (rf", $C_0={C0_dim:g}$" if neg else "") + "\n\n"
-        + f"frames: {len(full)}\n"
-        + f"τ: {full[0].tau:.4f} → {full[-1].tau:.4f}\n\n"
-        + phase_blurb
-        + f"A/A₀(end) = {full[-1].A/A0:.4f}\n"
-        + f"V/V₀(end) = {full[-1].V/V0:.4f}\n"
-        + f"v(end)    = {full[-1].v:.4f}\n"
-        + f"c₀(end)   = {full[-1].c0:.4f}\n"
-        + f"P(end)    = {full[-1].P:.4f}"
-    )
-    ax.text(0.05, 0.95, summary, transform=ax.transAxes, va="top", ha="left",
-            fontsize=10, family="monospace",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="#f7f4ef", edgecolor="0.8"))
-
-    fig.suptitle(title, fontsize=13)
-    fig.tight_layout()
-    png = out_dir / f"{stem}.png"
-    fig.savefig(png, dpi=150)
-    plt.close(fig)
-    return png
-
-
-def plot_two_sphere_detail(
-    rows: Sequence[Dict[str, Any]],
-    out_dir: Path,
-    *,
-    eta: Optional[float] = None,
-) -> Path:
-    if eta is None:
-        eta = ETA
-    out_dir = Path(out_dir)
-    ref = bs_point_a_ref(C0, c0_start=BS_C0_START)
-    A0ref, V0ref = float(ref["A"]), float(ref["V"])
-    ts = np.array([r["tau"] for r in rows])
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
-    axes[0, 0].plot(ts, [r["c0"] for r in rows], "-", color="#c45c26", lw=2)
-    axes[0, 0].axhline(BS_C0_END, color="0.5", ls=":", lw=0.8)
-    axes[0, 0].set_title(r"$c_0(\tau)$ (two-sphere)")
-    axes[0, 0].grid(True, alpha=0.3)
-
-    axes[0, 1].plot(ts, [r["v"] for r in rows], "-", color="#c45c26", lw=2)
-    axes[0, 1].axhline(BS_V_TWO_SPHERE, color="0.5", ls=":", lw=0.8)
-    axes[0, 1].set_title(r"$\bar v(\tau)$")
-    axes[0, 1].grid(True, alpha=0.3)
-
-    axes[1, 0].plot(ts, [r["A"] / A0ref for r in rows], "-", lw=2, label=r"$A/A_0$")
-    axes[1, 0].plot(ts, [r["V"] / V0ref for r in rows], "--", lw=1.6, label=r"$V/V_0$")
-    axes[1, 0].axhline(2.0, color="k", ls="--", lw=0.8, alpha=0.4)
-    axes[1, 0].legend()
-    axes[1, 0].set_title("doubling")
-    axes[1, 0].grid(True, alpha=0.3)
-
-    axes[1, 1].plot(ts, [r["R1"] for r in rows], "-", lw=2, label=r"$R_1$ (N)")
-    axes[1, 1].plot(ts, [r["R2"] for r in rows], "-", lw=2, label=r"$R_2$ (S)")
-    axes[1, 1].plot(ts, [r["P_bar"] for r in rows], ":", lw=1.5, label=r"$P̄$")
-    axes[1, 1].legend(fontsize=8)
-    axes[1, 1].set_title(r"$R_{1,2}$, $P̄$")
-    axes[1, 1].grid(True, alpha=0.3)
-
-    fig.suptitle(rf"Two-sphere finish $\tau_{{\mathrm{{fail}}}}\to$E ($\eta={eta:g}$)")
-    fig.tight_layout()
-    png = out_dir / "two_sphere_finish.png"
-    fig.savefig(png, dpi=150)
-    plt.close(fig)
-    return png
-
-
-# ---------------------------------------------------------------------------
-# Movie
-# ---------------------------------------------------------------------------
-
-def _profile_for_frame(fr: TrajFrame) -> Tuple[np.ndarray, np.ndarray]:
-    if fr.phase == "sphere":
-        return sphere_meridian(area_radius(fr.A))
-    if fr.phase == "two_sphere":
-        if fr.R1 is not None and fr.R2 is not None:
-            return two_sphere_meridian(fr.R1, fr.R2)
-        radii = two_sphere_radii_from_AV(fr.A, fr.V)
-        if radii is None:
-            return np.array([0.0]), np.array([0.0])
-        return two_sphere_meridian(radii[0], radii[1])
-    if fr.phase == "nested_sphere":
-        if fr.R1 is not None and fr.R2 is not None:
-            return nested_sphere_meridian(fr.R1, fr.R2)
-        radii = nested_sphere_radii_from_AV(fr.A, fr.V)
-        if radii is None:
-            return np.array([0.0]), np.array([0.0])
-        return nested_sphere_meridian(radii[0], radii[1])
-    if fr.sol is not None and fr.sol.y.shape[1] > 0:
-        x = np.asarray(fr.sol.X, dtype=float)
-        z = np.asarray(fr.sol.Z, dtype=float)
-        z = z - 0.5 * (z.max() + z.min())
-        return x, z
-    return np.array([0.0]), np.array([0.0])
-
-
-def movie_full_trajectory(
-    full: Sequence[TrajFrame],
-    out_dir: Path,
-    *,
-    eta: Optional[float] = None,
-    target_frames: int = 180,
-    fps: int = 16,
-    dpi: int = 110,
-    stem: str = "full_trajectory_shapes",
-    cache: Optional[Path] = None,
-) -> Path:
-    """Animate meridian profiles along the assembled full trajectory."""
-    if eta is None:
-        eta = ETA
-    if cache is None:
-        cache = CACHE
-    from matplotlib.animation import FFMpegWriter, PillowWriter, FuncAnimation
-
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if not full:
-        raise ValueError("empty trajectory")
-
-    frames = list(full)
-    attach_seifert_sols(frames, cache)
-
-    n = len(frames)
-    if target_frames > 0 and n > target_frames:
-        idx = np.linspace(0, n - 1, int(target_frames), dtype=int)
-        frames = [frames[i] for i in idx]
-        if frames[-1] is not full[-1]:
-            frames.append(full[-1])
-
-    print(
-        f"  movie: {len(frames)} profiles (from {n} full frames)…",
-        flush=True,
-    )
-    profiles: List[Tuple[np.ndarray, np.ndarray, TrajFrame]] = []
-    for i, fr in enumerate(frames):
-        r, z = _profile_for_frame(fr)
-        profiles.append((r, z, fr))
-        if (i + 1) % 40 == 0 or i == 0 or i == len(frames) - 1:
-            print(
-                f"    [{i+1}/{len(frames)}] τ={fr.tau:.4f}  "
-                f"{fr.phase}  v̄={fr.v:.4f}",
-                flush=True,
-            )
-
-    r_max = max(float(np.max(np.abs(r))) for r, _, _ in profiles if r.size > 1)
-    z_min = min(float(z.min()) for _, z, _ in profiles if z.size > 1)
-    z_max = max(float(z.max()) for _, z, _ in profiles if z.size > 1)
-    pad = 0.08 * max(r_max, z_max - z_min, 1.0)
-
-    fig, ax = plt.subplots(figsize=(5.2, 5.8))
-    line_r, = ax.plot([], [], lw=2.1)
-    line_l, = ax.plot([], [], lw=2.1)
-    subtitle = ax.set_title("")
-    ax.set_aspect("equal")
-    ax.set_xlim(-r_max - pad, r_max + pad)
-    ax.set_ylim(z_min - pad, z_max + pad)
-    ax.set_xlabel(r"$r$")
-    ax.set_ylabel(r"$z$")
-    ax.grid(True, alpha=0.25)
-    fig.suptitle(rf"Trajectory shapes ($\eta={eta:g}$)", fontsize=12)
-
-    def init():
-        line_r.set_data([], [])
-        line_l.set_data([], [])
-        subtitle.set_text("")
-        return line_r, line_l, subtitle
-
-    def update(k: int):
-        r, z, fr = profiles[k]
-        color = PHASE_COLORS.get(fr.phase, "#333333")
-        line_r.set_data(r, z)
-        line_l.set_data(-r, z)
-        line_r.set_color(color)
-        line_l.set_color(color)
-        subtitle.set_text(
-            rf"$\tau={fr.tau:.4f}$  {fr.phase.replace('_', '-')}  "
-            rf"$c_0={fr.c0:.3f}$  $\bar v={fr.v:.4f}$"
-        )
-        return line_r, line_l, subtitle
-
-    anim = FuncAnimation(
-        fig, update, init_func=init, frames=len(profiles), blit=True,
-    )
-    mp4 = out_dir / f"{stem}.mp4"
-    try:
-        writer = FFMpegWriter(fps=fps)
-        anim.save(str(mp4), writer=writer, dpi=dpi)
-        out_path = mp4
-    except Exception as exc:
-        print(f"  ffmpeg failed ({exc}); writing GIF…", flush=True)
-        gif = out_dir / f"{stem}.gif"
-        anim.save(str(gif), writer=PillowWriter(fps=max(8, fps // 2)), dpi=dpi)
-        out_path = gif
-    plt.close(fig)
-    print(f"saved {out_path}  ({len(profiles)} frames @ {fps} fps)", flush=True)
-    return out_path
-
+# Plotting: see bs_plotting (plot_full_trajectory, movie_full_trajectory, …)
 
 def save_full_json(
     full: Sequence[TrajFrame],
@@ -5515,6 +4493,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         flush=True,
     )
     print(f"saved {FULL_JSON}", flush=True)
+
+    from bs_plotting import movie_full_trajectory, plot_full_trajectory
 
     png = plot_full_trajectory(
         full, OUT, tau_D=tau_D, tau_fail=tau_fail,

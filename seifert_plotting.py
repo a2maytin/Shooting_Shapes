@@ -1,4 +1,4 @@
-"""Seifert shape plotting: meridian movies for Appendix-B / growth tracks."""
+"""Seifert shape plotting: meridian movies for shot / growth tracks."""
 
 from __future__ import annotations
 

@@ -1,4 +1,7 @@
-"""Seifert Appendix-B meridian shooting and shape equilibria.
+"""Seifert two-leg meridian shooting and shape equilibria.
+
+Shooting follows Seifert et al. (Phys. Rev. A 1991); branch-scan
+filters mirror the Fig. 16 caption conventions.
 
 Used by ``bs_functions`` for Božič–Svetina growth trajectories.
 """
@@ -19,10 +22,16 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import brentq, least_squares
 
+
+# --- Reduced geometry / spontaneous curvature ---------------------------------
+
 PACKAGE_ROOT = Path(__file__).resolve().parent
+
 A_STAR = 4.0 * np.pi
 
 V_STAR = lambda v: (4.0 * np.pi / 3.0) * v
+
+DEFAULT_BS_CACHE = PACKAGE_ROOT / "cache"
 
 def V_at_area(v: float, area: float = A_STAR) -> float:
     """Target volume for reduced volume ``v̄`` at surface area ``A`` (``V ∝ A^{3/2}``)."""
@@ -48,9 +57,8 @@ def C0_dimensional(c0: float, area: float = A_STAR) -> float:
     R = area_radius(area)
     return float(c0) / R if R > 0.0 else float(c0)
 
-def C0_for_shape(c0_reduced: float, area: float) -> float:
-    """Dimensional ``C₀`` in the shape equations for reduced ``c₀`` at area ``A``."""
-    return C0_dimensional(c0_reduced, area)
+
+# --- Solver parameters (branch scan + two-leg / AV-match bounds) ----------------
 
 POLE_R = 1e-6          # regularized r at the pole (≪ S_POLE so sphere C₂ is clean)
 
@@ -60,83 +68,130 @@ PSI_SOUTH = np.pi
 
 JUNCTION_FRAC = 0.45  # S̄ / S₁ (interior junction, Appendix B stage 2)
 
-FIG16_SIGMA_COEFF = -1.1  # Fig. 16: Σ̄ = FIG16_SIGMA_COEFF · P̄^{2/3}  (c₀ = 0 example)
+SCAN_SIGMA_COEFF = -1.1  # Fig. 16: Σ̄ = SCAN_SIGMA_COEFF · P̄^{2/3}  (c₀ = 0 example)
 
-FIG16_SCAN_MAX_STEP = 0.05  # stage-1 scan: RK45 step cap (fast branch map)
+SCAN_MAX_STEP = 0.05  # stage-1 scan: RK45 step cap (fast branch map)
 
-FIG16_SCAN_S_MAX = 160.0  # arclength ceiling if ψ=π not reached
+SCAN_S_MAX = 160.0  # arclength ceiling if ψ=π not reached
 
-FIG16_MAX_NFEV = 160_000  # Seifert Fig. 16 caption integration-step budget
+SCAN_MAX_NFEV = 160_000  # Seifert Fig. 16 caption integration-step budget
 
-FIG16_SCAN_RTOL = 1e-5
+SCAN_RTOL = 1e-5
 
-FIG16_SCAN_ATOL = 1e-7
+SCAN_ATOL = 1e-7
 
-FIG16_REFINE_MAX_STEP = 1e-3  # stage-2 / dense trial plots (paper step size)
+SCAN_REFINE_MAX_STEP = 1e-3  # stage-2 / dense trial plots (paper step size)
 
-FIG16_CROSSING_DEFAULT = 1  # S₁^{(n)} index n (n-th time ψ = π)
+SCAN_CROSSING_DEFAULT = 1  # S₁^{(n)} index n (n-th time ψ = π)
 
-FIG16_PSI_MIN = -2.0 * np.pi  # discard if ψ < −2π (Fig. 16 caption)
+SCAN_PSI_MIN = -2.0 * np.pi  # discard if ψ < −2π (Fig. 16 caption)
 
-FIG16_PSI_MAX = 3.0 * np.pi   # discard if ψ > 3π (Fig. 16 caption, n = 1)
+SCAN_PSI_MAX = 3.0 * np.pi   # discard if ψ > 3π (Fig. 16 caption, n = 1)
 
-FIG16_X_DISCARD = 1e-3  # discard if |X(S₁^{(n)})| P̄^{-1/3} < this (Fig. 16 caption)
+SCAN_X_DISCARD = 1e-3  # discard if |X(S₁^{(n)})| P̄^{-1/3} < this (Fig. 16 caption)
 
-FIG16_PSI_SWING_MAX = np.pi + 0.15  # reject legs with Δψ > π (looping meridian)
+SCAN_PSI_SWING_MAX = np.pi + 0.15  # reject legs with Δψ > π (looping meridian)
 
 NEAR_ZERO_X_DEFAULT = 0.15  # |X| P̄^{-1/3} cap for one-sided zero extrapolation
 
 SCAN_U0_TIMEOUT = 0.5  # seconds per U(0) trial before skipping
 
-FIG16_S1_MAX = 120.0  # branch-candidate filter upper bound on S₁
+SCAN_S1_MAX = 120.0  # branch-candidate filter upper bound on S₁
 
-FIG16_U0_SCALED_MIN = -0.8
+SCAN_U0_SCALED_MIN = -0.8
 
-FIG16_U0_SCALED_MAX = 0.8
+SCAN_U0_SCALED_MAX = 0.8
 
-FIG16_SCAN_GRID_POINTS = 120  # target count when building a wide U(0) grid
+SCAN_GRID_POINTS = 120  # target count when building a wide U(0) grid
 
-STAGE2_MAX_STEP = 0.04  # two-leg RK45 step cap (matches historical solver)
+TWO_LEG_MAX_STEP = 0.04  # two-leg RK45 step cap (matches historical solver)
 
-STAGE2_S1_MAX = 80.0  # upper S₁ bound for stage-2 shoot
+TWO_LEG_S1_MAX = 80.0  # upper S₁ bound for stage-2 shoot
 
-STAGE2_U0_MIN = -12.0
+TWO_LEG_U0_MIN = -12.0
 
-STAGE2_U0_MAX = 20.0
+TWO_LEG_U0_MAX = 20.0
 
-STAGE2_U1_MIN = -8.0
+TWO_LEG_U1_MIN = -8.0
 
-STAGE2_U1_MAX = 20.0
+TWO_LEG_U1_MAX = 20.0
 
-STAGE2_S1_MIN = 0.5
+TWO_LEG_S1_MIN = 0.5
 
-STAGE2_U0_ABS = 0.12  # ± absolute U(0)
+TWO_LEG_U0_ABS = 0.12  # ± absolute U(0)
 
-STAGE2_U0_REL = 0.12  # ± relative U(0); half-width = max(ABS, REL×|U₀*|)
+TWO_LEG_U0_REL = 0.12  # ± relative U(0); half-width = max(ABS, REL×|U₀*|)
 
-STAGE2_U1_ABS = 0.35  # ± absolute U₁ (pear south pole can differ from north-leg hint)
+TWO_LEG_U1_ABS = 0.35  # ± absolute U₁ (pear south pole can differ from north-leg hint)
 
-STAGE2_U1_REL = 0.35  # ± relative U₁
+TWO_LEG_U1_REL = 0.35  # ± relative U₁
 
-STAGE2_S1_REL = 0.12  # ± relative S₁ (short branches, S₁* ≈ closure length)
+TWO_LEG_S1_REL = 0.12  # ± relative S₁ (short branches, S₁* ≈ closure length)
 
-STAGE2_S1_REL_LONG = 0.50  # long prolate pears: closure S₁ can exceed north-leg S₁*
+TWO_LEG_S1_REL_LONG = 0.50  # long prolate pears: closure S₁ can exceed north-leg S₁*
 
-STAGE2_RESIDUAL_TIMEOUT = 1.0  # wall-clock cap per stage-2 residual evaluation
+TWO_LEG_RESIDUAL_TIMEOUT = 1.0  # wall-clock cap per stage-2 residual evaluation
 
-STAGE3_RESIDUAL_TIMEOUT = 2.5  # wall-clock cap per stage-3 residual evaluation
+AV_MATCH_TIMEOUT = 2.5  # wall-clock cap per stage-3 residual evaluation
 
-STAGE1_ROOT_MARCH_MAX = 500  # max outer march iterations
+P_ROOT_MARCH_MAX = 500  # max outer march iterations
 
-STAGE1_ROOT_BISECT_MAX = 80  # max bisection refinements per bracket
+P_ROOT_BISECT_MAX = 80  # max bisection refinements per bracket
 
-STAGE1_P_ROOT_STEP_DEFAULT = 5e-3  # initial leftward march in P̄ (E* sided search)
+P_ROOT_STEP_DEFAULT = 5e-3  # initial leftward march in P̄ (E* sided search)
 
-STAGE1_P_ROOT_STEP_MIN = 1e-8  # stop bisect / halving below this in P̄
+P_ROOT_STEP_MIN = 1e-8  # stop bisect / halving below this in P̄
 
-STAGE1_P_ROOT_X_TOL_DEFAULT = 3e-2  # target |X(S₁)| at P̄ root
+P_ROOT_X_TOL_DEFAULT = 3e-2  # target |X(S₁)| at P̄ root
 
-DEFAULT_BS_CACHE = PACKAGE_ROOT / "cache"
+TWO_LEG_BOUNDS = ([-20.0, -8.0, 0.5, -80.0, -80.0], [20.0, 20.0, 18.0, 80.0, 80.0])
+
+TWO_LEG_CLOSE_BOUNDS = (
+    [TWO_LEG_U0_MIN, TWO_LEG_U1_MIN, TWO_LEG_S1_MIN],
+    [TWO_LEG_U0_MAX, TWO_LEG_U1_MAX, TWO_LEG_S1_MAX],
+)
+
+
+# --- Solution container --------------------------------------------------------
+
+@dataclass
+class MeridianSolution:
+    v: float
+    c0: float
+    U0: float
+    U1: float
+    sigma_bar: float
+    P_bar: float
+    s: np.ndarray
+    y: np.ndarray
+    branch: str = "seifert"
+    success: bool = False
+    message: str = ""
+    constraints: Dict[str, float] = field(default_factory=dict)
+    S1: float = 0.0
+    S_bar: float = 0.0
+
+    @property
+    def X(self) -> np.ndarray:
+        return self.y[0]
+
+    @property
+    def Z(self) -> np.ndarray:
+        return self.y[1]
+
+    @property
+    def U(self) -> np.ndarray:
+        return self.y[3]
+
+    @property
+    def gamma(self) -> np.ndarray:
+        return self.y[4]
+
+    def copy(self) -> "MeridianSolution":
+        return replace(self)
+
+
+# --- Meridian ODE --------------------------------------------------------------
 
 def C2(X: float, psi: float) -> float:
     """Azimuthal curvature C₂ = sin ψ / X (eq. 3.1d; regularized at the pole)."""
@@ -180,12 +235,7 @@ def sphere_state(S: float, R: float = 1.0) -> np.ndarray:
     ])
 
 def gamma_from_H0(
-    X: float,
-    psi: float,
-    U: float,
-    C0: float,
-    sigma_bar: float,
-    P_bar: float,
+    X: float, psi: float, U: float, C0: float, sigma_bar: float, P_bar: float,
 ) -> float:
     """Lagrange multiplier γ from the first integral ``H = 0`` (eq. 3.4).
 
@@ -205,12 +255,8 @@ def gamma_from_H0(
     )
     return float(-h_no_gamma / cosp)
 
-def north_pole_state(
-    U0: float,
-    *,
-    C0: float = 0.0,
-    sigma_bar: float = 0.0,
-    P_bar: float = 0.0,
+def north_pole_state(U0: float, *,
+    C0: float = 0.0, sigma_bar: float = 0.0, P_bar: float = 0.0,
 ) -> np.ndarray:
     """Regularized north pole with ψ ≈ U₀ S and U = U₀ (eqs. 3.5a, 3.6a,c, 3.8).
 
@@ -234,14 +280,8 @@ def north_pole_state(
     y0[4] = gamma_from_H0(y0[0], y0[2], y0[3], C0, sigma_bar, P_bar)
     return y0
 
-def south_pole_state_totals(
-    U1: float,
-    A1: float,
-    V1: float,
-    *,
-    C0: float = 0.0,
-    sigma_bar: float = 0.0,
-    P_bar: float = 0.0,
+def south_pole_state_totals(U1: float, A1: float, V1: float, *,
+    C0: float = 0.0, sigma_bar: float = 0.0, P_bar: float = 0.0,
 ) -> np.ndarray:
     """Regularized south pole: ψ ≈ π − U₁ S, U = U₁ (mirror of :func:`north_pole_state`).
 
@@ -274,58 +314,22 @@ def south_pole_state_totals(
     y0[4] = gamma_from_H0(X, th, U1, C0, sigma_bar, P_bar)
     return y0
 
-@dataclass
-class MeridianSolution:
-    v: float
-    c0: float
-    U0: float
-    U1: float
-    sigma_bar: float
-    P_bar: float
-    s: np.ndarray
-    y: np.ndarray
-    branch: str = "seifert"
-    success: bool = False
-    message: str = ""
-    constraints: Dict[str, float] = field(default_factory=dict)
-    S1: float = 0.0
-    S_bar: float = 0.0
 
-    @property
-    def X(self) -> np.ndarray:
-        return self.y[0]
-
-    @property
-    def Z(self) -> np.ndarray:
-        return self.y[1]
-
-    @property
-    def U(self) -> np.ndarray:
-        return self.y[3]
-
-    @property
-    def gamma(self) -> np.ndarray:
-        return self.y[4]
-
-    def copy(self) -> "MeridianSolution":
-        return replace(self)
-
-# U₀ lower bound must admit deep stomatocytes at A★ (e.g. free-close U₀ ≲ −7).
-TWO_LEG_BOUNDS = ([-20.0, -8.0, 0.5, -80.0, -80.0], [20.0, 20.0, 18.0, 80.0, 80.0])
+# --- Branch-scan filters & leg integration -------------------------------------
 
 def sigma_bar_from_P(P_bar: float) -> float:
     """Σ̄ = -1.1 · P̄^{2/3} (Seifert reduced c₀ = 0 example)."""
     if abs(P_bar) < 1e-14:
         return 0.0
-    return FIG16_SIGMA_COEFF * (abs(P_bar) ** (2.0 / 3.0))
+    return SCAN_SIGMA_COEFF * (abs(P_bar) ** (2.0 / 3.0))
 
 def _psi_window_max(n: int) -> float:
     """Upper ψ abort for ``S₁^{(n)}`` (caption uses 3π; higher n needs more room)."""
-    return float(max(FIG16_PSI_MAX, (2 * n - 1) * np.pi))
+    return float(max(SCAN_PSI_MAX, (2 * n - 1) * np.pi))
 
 def _psi_out_of_window(psi: float, *, n: int = 1) -> bool:
     """Fig.~16 caption: discard when ``ψ`` leaves ``[-2π, ψ_max(n)]``."""
-    return psi < FIG16_PSI_MIN or psi > _psi_window_max(n) + 1e-9
+    return psi < SCAN_PSI_MIN or psi > _psi_window_max(n) + 1e-9
 
 def _x_scaled(x: float, P_bar: float) -> float:
     """``|X|`` on Fig.~16 axes: ``|X| · P̄^{-1/3}``."""
@@ -342,13 +346,13 @@ def _discard_u0_trial(y: np.ndarray, P_bar: float, *, n: int = 1) -> bool:
     """
     if _psi_out_of_window(float(y[2]), n=n):
         return True
-    return _x_scaled(float(y[0]), P_bar) < FIG16_X_DISCARD
+    return _x_scaled(float(y[0]), P_bar) < SCAN_X_DISCARD
 
-def _fig16_psi_window_events(*, n: int = 1) -> List:
+def _branch_psi_window_events(*, n: int = 1) -> List:
     """Fig.~16 ψ-window terminal events only (no ``ψ = π`` hit)."""
 
     def abort_psi_low(_S: float, y: np.ndarray) -> float:
-        return float(y[2] - FIG16_PSI_MIN)
+        return float(y[2] - SCAN_PSI_MIN)
 
     abort_psi_low.terminal = True
     abort_psi_low.direction = -1
@@ -363,35 +367,27 @@ def _fig16_psi_window_events(*, n: int = 1) -> List:
 
     return [abort_psi_low, abort_psi_high]
 
-def _fig16_leg_psi_loops(psi: np.ndarray) -> bool:
+def _leg_psi_loops(psi: np.ndarray) -> bool:
     """True when ψ swings by more than π along one leg (self-looping meridian)."""
     psi = np.asarray(psi, dtype=float)
     if psi.size < 2:
         return False
-    return float(np.max(psi) - np.min(psi)) > FIG16_PSI_SWING_MAX
+    return float(np.max(psi) - np.min(psi)) > SCAN_PSI_SWING_MAX
 
-def _fig16_leg_psi_valid(psi: np.ndarray, *, n: int = 1) -> bool:
+def _leg_psi_valid(psi: np.ndarray, *, n: int = 1) -> bool:
     """Fig.~16 leg check: ψ in ``[-2π, ψ_max(n)]`` and no π-swing loop."""
     psi = np.asarray(psi, dtype=float)
     if psi.size == 0:
         return False
-    if _fig16_leg_psi_loops(psi):
+    if _leg_psi_loops(psi):
         return False
     return all(not _psi_out_of_window(float(p), n=n) for p in psi)
 
-def _integrate_leg_fig16(
-    rhs,
-    t_span: Tuple[float, float],
-    y0: np.ndarray,
-    *,
-    n_crossing: int = 1,
-    max_step: float,
-    rtol: float,
-    atol: float,
-    dense: bool = False,
+def _integrate_leg_filtered(rhs, t_span: Tuple[float, float], y0: np.ndarray, *,
+    n_crossing: int = 1, max_step: float, rtol: float, atol: float, dense: bool = False,
 ) -> Optional[Any]:
     """Integrate one meridian leg; ``None`` if Fig.~16 ψ window or loop rule fires."""
-    events = _fig16_psi_window_events(n=n_crossing)
+    events = _branch_psi_window_events(n=n_crossing)
     ivp = solve_ivp(
         rhs, t_span, np.asarray(y0, dtype=float), method="RK45",
         events=events, dense_output=dense,
@@ -402,15 +398,12 @@ def _integrate_leg_fig16(
     for te in ivp.t_events:
         if len(te) > 0:
             return None
-    if not _fig16_leg_psi_valid(ivp.y[2, :], n=n_crossing):
+    if not _leg_psi_valid(ivp.y[2, :], n=n_crossing):
         return None
     return ivp
 
-def _resolve_S_bar(
-    S1: float,
-    *,
-    junction_frac: Optional[float] = None,
-    S_bar: Optional[float] = None,
+def _resolve_S_bar(S1: float, *,
+    junction_frac: Optional[float] = None, S_bar: Optional[float] = None,
     north_frac: Optional[float] = None,
 ) -> float:
     """Interior junction arclength ``S̄`` from total meridian length ``S₁``.
@@ -447,15 +440,8 @@ def _two_leg_lengths(S1: float, S_bar: float) -> Tuple[float, float]:
     S_south = float(S1) - S_POLE
     return float(S_bar) - S_POLE, S_south - float(S_bar)
 
-def _integrate_leg_raw(
-    rhs,
-    t_span: Tuple[float, float],
-    y0: np.ndarray,
-    *,
-    max_step: float,
-    rtol: float,
-    atol: float,
-    dense: bool = False,
+def _integrate_leg_raw(rhs, t_span: Tuple[float, float], y0: np.ndarray, *,
+    max_step: float, rtol: float, atol: float, dense: bool = False,
 ) -> Optional[Any]:
     """Integrate one meridian leg without Fig.~16 discard (for diagnostic plots)."""
     ivp = solve_ivp(
@@ -464,20 +450,12 @@ def _integrate_leg_raw(
     )
     return ivp if ivp.success else None
 
-def _integrate_leg(
-    rhs,
-    t_span: Tuple[float, float],
-    y0: np.ndarray,
-    *,
-    max_step: float,
-    rtol: float,
-    atol: float,
-    dense: bool = False,
-    enforce_fig16: bool = True,
-    n_crossing: int = 1,
+def _integrate_leg(rhs, t_span: Tuple[float, float], y0: np.ndarray, *,
+    max_step: float, rtol: float, atol: float, dense: bool = False,
+    enforce_branch_filters: bool = True, n_crossing: int = 1,
 ) -> Optional[Any]:
-    if enforce_fig16:
-        return _integrate_leg_fig16(
+    if enforce_branch_filters:
+        return _integrate_leg_filtered(
             rhs, t_span, y0,
             n_crossing=n_crossing, max_step=max_step, rtol=rtol, atol=atol, dense=dense,
         )
@@ -505,7 +483,7 @@ def _u0_scan_events(*, n: int = 1) -> List:
     hit_psi.direction = 0  # count every crossing of ψ = π
 
     def abort_psi_low(_S: float, y: np.ndarray) -> float:
-        return float(y[2] - FIG16_PSI_MIN)
+        return float(y[2] - SCAN_PSI_MIN)
 
     abort_psi_low.terminal = True
     abort_psi_low.direction = -1
@@ -520,16 +498,8 @@ def _u0_scan_events(*, n: int = 1) -> List:
 
     return [hit_psi, abort_psi_low, abort_psi_high]
 
-def _solve_u0_ivp(
-    rhs,
-    t_span: Tuple[float, float],
-    y0: np.ndarray,
-    events: List,
-    *,
-    max_step: float,
-    rtol: float,
-    atol: float,
-    max_nfev: int = FIG16_MAX_NFEV,
+def _solve_u0_ivp(rhs, t_span: Tuple[float, float], y0: np.ndarray, events: List, *,
+    max_step: float, rtol: float, atol: float, max_nfev: int = SCAN_MAX_NFEV,
 ) -> Optional[Tuple[Any, int, float]]:
     """Integrate with chunked ``nfev`` accounting (Fig.~16 step budget).
 
@@ -559,24 +529,15 @@ def _solve_u0_ivp(
         S_cur = float(ivp.t[-1])
     return None
 
-def _integrate_to_psi_pi(
-    U0: float,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    *,
-    S_max: float = FIG16_SCAN_S_MAX,
-    rtol: float = FIG16_SCAN_RTOL,
-    atol: float = FIG16_SCAN_ATOL,
-    n: int = FIG16_CROSSING_DEFAULT,
-    crossing: Optional[int] = None,
-    max_step: float = FIG16_SCAN_MAX_STEP,
+def _integrate_to_psi_pi(U0: float, sigma_bar: float, P_bar: float, c0: float, *,
+    S_max: float = SCAN_S_MAX, rtol: float = SCAN_RTOL, atol: float = SCAN_ATOL,
+    n: int = SCAN_CROSSING_DEFAULT, crossing: Optional[int] = None, max_step: float = SCAN_MAX_STEP,
     apply_x_discard: bool = True,
 ) -> Optional[Tuple[np.ndarray, float]]:
     """Integrate to Appendix B ``S₁^{(n)}``: the ``n``-th time ``ψ(S) = π``.
 
     Fig.~16 discards when the step budget is exceeded, ``ψ`` leaves the caption
-    window, or (if ``apply_x_discard``) ``|X(S₁^{(n)})| P̄^{-1/3} < FIG16_X_DISCARD``.
+    window, or (if ``apply_x_discard``) ``|X(S₁^{(n)})| P̄^{-1/3} < SCAN_X_DISCARD``.
 
     Set ``apply_x_discard=False`` for stage-1 root refinement near ``X = 0``.
     """
@@ -638,6 +599,9 @@ def _call_with_timeout(timeout: Optional[float], func, *args, **kwargs):
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old_handler)
 
+
+# --- Branch scan: U(0) / P̄ seeds ------------------------------------------------
+
 def _scan_u0_worker(
     job: Tuple[int, float, float, float, float, int, float, float, Optional[float]],
 ) -> Tuple[int, bool, Optional[Tuple[np.ndarray, float]]]:
@@ -651,24 +615,15 @@ def _scan_u0_worker(
     )
     return i, timed_out, out
 
-def scan_u0(
-    c0: float,
-    U0_values: Optional[np.ndarray] = None,
-    *,
-    sigma_bar: float = 0.0,
-    P_bar: float = 0.0,
-    n: int = FIG16_CROSSING_DEFAULT,
-    crossing: Optional[int] = None,
-    S_max: float = FIG16_SCAN_S_MAX,
-    max_step: float = FIG16_SCAN_MAX_STEP,
-    timeout: Optional[float] = SCAN_U0_TIMEOUT,
-    workers: Optional[int] = None,
-    verbose: bool = False,
+def scan_u0(c0: float, U0_values: Optional[np.ndarray] = None, *,
+    sigma_bar: float = 0.0, P_bar: float = 0.0, n: int = SCAN_CROSSING_DEFAULT,
+    crossing: Optional[int] = None, S_max: float = SCAN_S_MAX, max_step: float = SCAN_MAX_STEP,
+    timeout: Optional[float] = SCAN_U0_TIMEOUT, workers: Optional[int] = None, verbose: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Scan ``U(0)``: record ``X(S₁^{(n)})`` and ``U(S₁^{(n)})`` (Appendix B).
 
     ``S₁^{(n)}`` is the ``n``-th time ``ψ(S) = π``.  Trials with
-    ``|X| P̄^{-1/3} < FIG16_X_DISCARD`` are omitted (NaN) per Fig.~16.
+    ``|X| P̄^{-1/3} < SCAN_X_DISCARD`` are omitted (NaN) per Fig.~16.
 
     Trials run in parallel (``workers`` processes, default = CPU count).
     Each trial is capped by ``timeout`` seconds; slow paths are skipped.
@@ -769,19 +724,10 @@ def _scan_p_bar_worker(
     )
     return i, timed_out, out
 
-def scan_p_bar(
-    c0: float,
-    U0: float,
-    P_values: np.ndarray,
-    *,
-    sigma_bar: float = 0.0,
-    n: int = FIG16_CROSSING_DEFAULT,
-    crossing: Optional[int] = None,
-    S_max: float = FIG16_SCAN_S_MAX,
-    max_step: float = FIG16_SCAN_MAX_STEP,
-    timeout: Optional[float] = SCAN_U0_TIMEOUT,
-    workers: Optional[int] = None,
-    verbose: bool = False,
+def scan_p_bar(c0: float, U0: float, P_values: np.ndarray, *,
+    sigma_bar: float = 0.0, n: int = SCAN_CROSSING_DEFAULT, crossing: Optional[int] = None,
+    S_max: float = SCAN_S_MAX, max_step: float = SCAN_MAX_STEP,
+    timeout: Optional[float] = SCAN_U0_TIMEOUT, workers: Optional[int] = None, verbose: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Scan ``P̄`` at fixed ``U(0)``: record ``X(S₁^{(n)})`` and ``U(S₁^{(n)})``."""
     if crossing is not None:
@@ -867,11 +813,7 @@ def scan_p_bar(
     return P_values, X_south, U_south, S1_hit
 
 def roots_from_scan(
-    param: np.ndarray,
-    X_south: np.ndarray,
-    U_south: np.ndarray,
-    S1_hit: np.ndarray,
-    *,
+    param: np.ndarray, X_south: np.ndarray, U_south: np.ndarray, S1_hit: np.ndarray, *,
     x_tol: float = 0.03,
 ) -> List[Tuple[float, float, float]]:
     """``X(S₁)=0`` roots on a 1D scan in ``param`` (``P̄`` or ``U(0)``).
@@ -901,29 +843,22 @@ def roots_from_scan(
     roots.sort(key=lambda t: t[0])
     return roots
 
-def _stage1_p_hit(
-    P_bar: float,
-    *,
-    U0: float,
-    c0: float,
-    sigma_bar: float,
-    n_s1: int = 1,
-    max_step: Optional[float] = None,
-    rtol: Optional[float] = None,
-    atol: Optional[float] = None,
+def _p_bar_x_hit(P_bar: float, *,
+    U0: float, c0: float, sigma_bar: float, n_s1: int = 1, max_step: Optional[float] = None,
+    rtol: Optional[float] = None, atol: Optional[float] = None,
 ) -> Optional[Tuple[float, float, float]]:
     """Signed ``X(S₁^{(n)})``, ``U(S₁)``, ``S₁`` at fixed ``U(0)`` and scanned ``P̄``."""
     specs: List[Tuple[float, float, float]] = []
     if max_step is not None:
         specs.append((
             float(max_step),
-            float(rtol if rtol is not None else FIG16_SCAN_RTOL),
-            float(atol if atol is not None else FIG16_SCAN_ATOL),
+            float(rtol if rtol is not None else SCAN_RTOL),
+            float(atol if atol is not None else SCAN_ATOL),
         ))
     else:
         specs.extend([
-            (FIG16_SCAN_MAX_STEP, FIG16_SCAN_RTOL, FIG16_SCAN_ATOL),
-            (FIG16_REFINE_MAX_STEP, 1e-7, 1e-9),
+            (SCAN_MAX_STEP, SCAN_RTOL, SCAN_ATOL),
+            (SCAN_REFINE_MAX_STEP, 1e-7, 1e-9),
         ])
     for ms, rt, at in specs:
         out = _integrate_to_psi_pi(
@@ -936,10 +871,8 @@ def _stage1_p_hit(
             return float(yf[0]), float(yf[3]), float(s1)
     return None
 
-def _stage1_param_record_history(
-    history: Optional[List[Tuple[float, float]]],
-    param: float,
-    x: float,
+def _p_root_record_history(
+    history: Optional[List[Tuple[float, float]]], param: float, x: float,
 ) -> None:
     if history is None:
         return
@@ -948,21 +881,9 @@ def _stage1_param_record_history(
         return
     history.append((param, x))
 
-def _refine_stage1_p_bracket(
-    p_lo: float,
-    x_lo: float,
-    p_hi: float,
-    x_hi: float,
-    *,
-    U0: float,
-    c0: float,
-    sigma_bar: float,
-    n_s1: int,
-    max_step: float,
-    x_tol: float,
-    p_tol: float,
-    max_iter: int = STAGE1_ROOT_BISECT_MAX,
-    verbose: bool = False,
+def _refine_p_bar_bracket(p_lo: float, x_lo: float, p_hi: float, x_hi: float, *,
+    U0: float, c0: float, sigma_bar: float, n_s1: int, max_step: float, x_tol: float, p_tol: float,
+    max_iter: int = P_ROOT_BISECT_MAX, verbose: bool = False,
     history: Optional[List[Tuple[float, float]]] = None,
 ) -> Tuple[float, float, float, float]:
     """Bisect ``[p_lo, p_hi]`` toward ``X=0`` at fixed ``U(0)``."""
@@ -975,13 +896,13 @@ def _refine_stage1_p_bracket(
         p_best, x_best = p_lo, x_lo
     else:
         p_best, x_best = p_hi, x_hi
-    hit_best = _stage1_p_hit(
+    hit_best = _p_bar_x_hit(
         p_best, U0=U0, c0=c0, sigma_bar=sigma_bar, n_s1=n_s1, max_step=max_step,
     )
     if hit_best is None:
         return p_best, x_best, 0.0, 0.0
     _, us_best, s1_best = hit_best
-    _stage1_param_record_history(history, p_best, x_best)
+    _p_root_record_history(history, p_best, x_best)
 
     for k in range(int(max_iter)):
         if p_hi - p_lo <= float(p_tol):
@@ -990,13 +911,13 @@ def _refine_stage1_p_bracket(
             break
 
         p_mid = 0.5 * (p_lo + p_hi)
-        hit = _stage1_p_hit(
+        hit = _p_bar_x_hit(
             p_mid, U0=U0, c0=c0, sigma_bar=sigma_bar, n_s1=n_s1, max_step=max_step,
         )
         if hit is None:
             break
         x_mid, us_mid, s1_mid = hit
-        _stage1_param_record_history(history, p_mid, x_mid)
+        _p_root_record_history(history, p_mid, x_mid)
         if abs(x_mid) < abs(x_best):
             p_best, x_best, us_best, s1_best = p_mid, x_mid, us_mid, s1_mid
         if abs(x_mid) <= float(x_tol):
@@ -1016,21 +937,11 @@ def _refine_stage1_p_bracket(
 
     return p_best, x_best, us_best, s1_best
 
-def find_stage1_p_root_from_right(
-    p_start: float,
-    *,
-    U0: float,
-    c0: float,
-    sigma_bar: float,
-    n_s1: int = 1,
-    step: float = STAGE1_P_ROOT_STEP_DEFAULT,
-    step_min: float = STAGE1_P_ROOT_STEP_MIN,
-    x_tol: float = STAGE1_P_ROOT_X_TOL_DEFAULT,
-    max_step: Optional[float] = None,
-    max_marches: int = STAGE1_ROOT_MARCH_MAX,
-    step_shrink: float = 0.5,
-    verbose: bool = False,
-    history: Optional[List[Tuple[float, float]]] = None,
+def find_p_bar_root_from_right(p_start: float, *,
+    U0: float, c0: float, sigma_bar: float, n_s1: int = 1, step: float = P_ROOT_STEP_DEFAULT,
+    step_min: float = P_ROOT_STEP_MIN, x_tol: float = P_ROOT_X_TOL_DEFAULT,
+    max_step: Optional[float] = None, max_marches: int = P_ROOT_MARCH_MAX, step_shrink: float = 0.5,
+    verbose: bool = False, history: Optional[List[Tuple[float, float]]] = None,
 ) -> Optional[Tuple[float, float, float]]:
     """Lower ``X(S₁^{(n)})`` by marching left in ``P̄`` from the right-hand branch.
 
@@ -1045,7 +956,7 @@ def find_stage1_p_root_from_right(
         raise ValueError("step and step_min must be positive")
     p_tol = step_min
 
-    hit0 = _stage1_p_hit(
+    hit0 = _p_bar_x_hit(
         p_start, U0=U0, c0=c0, sigma_bar=sigma_bar, n_s1=n_s1, max_step=max_step,
     )
     if hit0 is None:
@@ -1059,20 +970,20 @@ def find_stage1_p_root_from_right(
     p = p_start
     step_cur = step
     p_best, x_best, us_best, s1_best = p, x, u_south, s1
-    _stage1_param_record_history(history, p, x)
+    _p_root_record_history(history, p, x)
 
     def _finish_root() -> Tuple[float, float, float]:
         nonlocal p_best, x_best, us_best, s1_best
         if x_best > 0.0:
             p_try = p_best - max(step_min, 10.0 * step_min)
-            hit = _stage1_p_hit(
+            hit = _p_bar_x_hit(
                 p_try, U0=U0, c0=c0, sigma_bar=sigma_bar, n_s1=n_s1, max_step=max_step,
             )
             if hit is not None and hit[0] <= 0.0:
-                p_b, x_b, us_b, s1_b = _refine_stage1_p_bracket(
+                p_b, x_b, us_b, s1_b = _refine_p_bar_bracket(
                     p_try, hit[0], p_best, x_best,
                     U0=U0, c0=c0, sigma_bar=sigma_bar, n_s1=n_s1,
-                    max_step=max_step or FIG16_REFINE_MAX_STEP,
+                    max_step=max_step or SCAN_REFINE_MAX_STEP,
                     x_tol=min(float(x_tol), 1e-4), p_tol=p_tol,
                     verbose=verbose, history=history,
                 )
@@ -1099,7 +1010,7 @@ def find_stage1_p_root_from_right(
             break
 
         p_try = p - step_cur
-        hit = _stage1_p_hit(
+        hit = _p_bar_x_hit(
             p_try, U0=U0, c0=c0, sigma_bar=sigma_bar, n_s1=n_s1, max_step=max_step,
         )
         if hit is None:
@@ -1113,7 +1024,7 @@ def find_stage1_p_root_from_right(
             continue
 
         x_try, u1_try, s1_try = hit
-        _stage1_param_record_history(history, p_try, x_try)
+        _p_root_record_history(history, p_try, x_try)
         if abs(x_try) < abs(x_best):
             p_best, x_best, us_best, s1_best = p_try, x_try, u1_try, s1_try
 
@@ -1124,9 +1035,9 @@ def find_stage1_p_root_from_right(
                     f"→ bisect [{p_try:.8g}, {p:.8g}]",
                     flush=True,
                 )
-            p_b, x_b, us_b, s1_b = _refine_stage1_p_bracket(
+            p_b, x_b, us_b, s1_b = _refine_p_bar_bracket(
                 p_try, x_try, p, x,
-                U0=U0, c0=c0, sigma_bar=sigma_bar, n_s1=n_s1, max_step=max_step or FIG16_REFINE_MAX_STEP,
+                U0=U0, c0=c0, sigma_bar=sigma_bar, n_s1=n_s1, max_step=max_step or SCAN_REFINE_MAX_STEP,
                 x_tol=x_tol, p_tol=p_tol, verbose=verbose, history=history,
             )
             if abs(x_b) < abs(x_best):
@@ -1174,17 +1085,12 @@ def _default_u0_grid(c0: float, P_bar: float = 1.0) -> np.ndarray:
     if c0 >= 2.0:
         return u0_grid(0.0, 3.5, n_points=36, P_bar=P_bar)
     return u0_grid(
-        FIG16_U0_SCALED_MIN, FIG16_U0_SCALED_MAX, n_points=33, P_bar=P_bar,
+        SCAN_U0_SCALED_MIN, SCAN_U0_SCALED_MAX, n_points=33, P_bar=P_bar,
     )
 
 def near_zero_seeds(
-    U0_values: np.ndarray,
-    X_south: np.ndarray,
-    U_south: np.ndarray,
-    S1_hit: np.ndarray,
-    *,
-    P_bar: float = 1.0,
-    x_tol: float = NEAR_ZERO_X_DEFAULT,
+    U0_values: np.ndarray, X_south: np.ndarray, U_south: np.ndarray, S1_hit: np.ndarray, *,
+    P_bar: float = 1.0, x_tol: float = NEAR_ZERO_X_DEFAULT,
 ) -> List[Tuple[float, float, float]]:
     """Stage-1 seeds for Appendix B stage 2: ``(U(0)*, U₁*, S₁*)``.
 
@@ -1324,7 +1230,7 @@ def near_zero_seeds(
     for g, q in sorted(candidates, key=lambda t: (t[0][0] * p_inv, t[1])):
         if not all(np.isfinite(g)):
             continue
-        if not (0.2 < g[2] < FIG16_S1_MAX):
+        if not (0.2 < g[2] < SCAN_S1_MAX):
             continue
         u_scaled = float(g[0]) * p_inv
         merged = False
@@ -1337,11 +1243,8 @@ def near_zero_seeds(
     out.sort(key=lambda t: t[0])
     return out
 
-def scan_branch_seeds(
-    c0: float,
-    *,
-    P_bar_values: Optional[List[float]] = None,
-    x_tol: float = NEAR_ZERO_X_DEFAULT,
+def scan_branch_seeds(c0: float, *,
+    P_bar_values: Optional[List[float]] = None, x_tol: float = NEAR_ZERO_X_DEFAULT,
 ) -> List[Tuple[float, float, float]]:
     """Run the default ``U(0)`` scan and collect near-zero seeds."""
     if P_bar_values is None:
@@ -1354,30 +1257,23 @@ def scan_branch_seeds(
         all_guesses.extend(near_zero_seeds(u, xs, us, s1, P_bar=P_bar, x_tol=x_tol))
     out: List[Tuple[float, float, float]] = []
     for g in all_guesses:
-        if not all(np.isfinite(g)) or not (0.2 < g[2] < FIG16_S1_MAX):
+        if not all(np.isfinite(g)) or not (0.2 < g[2] < SCAN_S1_MAX):
             continue
         if not any(abs(g[0] - t[0]) < 0.08 for t in out):
             out.append(g)
     out.sort(key=lambda t: t[0])
     return out
 
-def integrate_stage1_profile(
-    U0: float,
-    *,
-    c0: float,
-    P_bar: float,
-    sigma_bar: Optional[float] = None,
-    n: int = 280,
-    S_max: Optional[float] = None,
-    n_s1: int = 1,
-    max_step: float = FIG16_SCAN_MAX_STEP,
+def integrate_scan_leg_profile(U0: float, *,
+    c0: float, P_bar: float, sigma_bar: Optional[float] = None, n: int = 280,
+    S_max: Optional[float] = None, n_s1: int = 1, max_step: float = SCAN_MAX_STEP,
     timeout: Optional[float] = 45.0,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     """North-leg profile to ``S₁^{(n)}`` without Fig.~16 ``X`` discard (for root plots)."""
-    s_cap = float(S_max if S_max is not None else max(FIG16_SCAN_S_MAX, 120.0))
+    s_cap = float(S_max if S_max is not None else max(SCAN_S_MAX, 120.0))
     out, timed_out = _call_with_timeout(
         timeout,
-        _integrate_stage1_profile_impl,
+        _integrate_scan_leg_profile_impl,
         U0,
         c0=c0,
         P_bar=P_bar,
@@ -1391,21 +1287,14 @@ def integrate_stage1_profile(
         return None
     return out
 
-def _integrate_stage1_profile_impl(
-    U0: float,
-    *,
-    c0: float,
-    P_bar: float,
-    sigma_bar: Optional[float] = None,
-    n: int = 280,
-    S_max: float = FIG16_SCAN_S_MAX,
-    n_s1: int = 1,
-    max_step: float = FIG16_SCAN_MAX_STEP,
+def _integrate_scan_leg_profile_impl(U0: float, *,
+    c0: float, P_bar: float, sigma_bar: Optional[float] = None, n: int = 280,
+    S_max: float = SCAN_S_MAX, n_s1: int = 1, max_step: float = SCAN_MAX_STEP,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     if sigma_bar is None:
         sigma_bar = sigma_bar_from_P(P_bar)
-    if max_step >= FIG16_SCAN_MAX_STEP:
-        rtol, atol = FIG16_SCAN_RTOL, FIG16_SCAN_ATOL
+    if max_step >= SCAN_MAX_STEP:
+        rtol, atol = SCAN_RTOL, SCAN_ATOL
     else:
         rtol, atol = 1e-7, 1e-9
     C0 = C0_dimensional(c0, A_STAR)
@@ -1450,18 +1339,8 @@ def _integrate_stage1_profile_impl(
     y_full = np.concatenate(y_parts, axis=1)
     return s_full, y_full[0], y_full[1], yf
 
-STAGE2_BOUNDS = (
-    [STAGE2_U0_MIN, STAGE2_U1_MIN, STAGE2_S1_MIN],
-    [STAGE2_U0_MAX, STAGE2_U1_MAX, STAGE2_S1_MAX],
-)
-
-def u0_grid(
-    u_min: float,
-    u_max: float,
-    *,
-    step: Optional[float] = None,
-    n_points: int = FIG16_SCAN_GRID_POINTS,
-    P_bar: float = 1.0,
+def u0_grid(u_min: float, u_max: float, *,
+    step: Optional[float] = None, n_points: int = SCAN_GRID_POINTS, P_bar: float = 1.0,
 ) -> np.ndarray:
     """Raw ``U(0)`` grid for a scan window (barred units × ``P̄^{1/3}`` if ``P̄≠1``).
 
@@ -1474,11 +1353,11 @@ def u0_grid(
     )
     return np.asarray(scaled, dtype=float) * p_pos
 
+
+# --- Two-leg junction close -----------------------------------------------------
+
 def _stitch_meridian_profile(
-    sn: np.ndarray,
-    ss: np.ndarray,
-    yn: np.ndarray,
-    ys: np.ndarray,
+    sn: np.ndarray, ss: np.ndarray, yn: np.ndarray, ys: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Join north/south legs; fix Z gauge (shape equations are Z-translation invariant)."""
     ys = np.asarray(ys, dtype=float).copy()
@@ -1490,22 +1369,10 @@ def _stitch_meridian_profile(
     return s_full, y_full
 
 def _integrate_two_legs(
-    U0: float,
-    U1: float,
-    S1: float,
-    S_bar: float,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    v: float,
-    *,
-    dense: bool = False,
-    n: int = 200,
-    rtol: float = 1e-7,
-    atol: float = 1e-9,
-    max_step: float = STAGE2_MAX_STEP,
-    enforce_fig16: bool = True,
-    A_c0: float = A_STAR,
+    U0: float, U1: float, S1: float, S_bar: float, sigma_bar: float, P_bar: float, c0: float,
+    v: float, *,
+    dense: bool = False, n: int = 200, rtol: float = 1e-7, atol: float = 1e-9,
+    max_step: float = TWO_LEG_MAX_STEP, enforce_branch_filters: bool = True, A_c0: float = A_STAR,
     A_target: float = A_STAR,
 ):
     """North leg S₀→S̄ and south leg S₁→S̄ (paper: integrate backward from south pole)."""
@@ -1513,7 +1380,7 @@ def _integrate_two_legs(
     if S1 <= 2.0 * S_POLE + 0.05 or S_bar <= S_POLE + 0.02 or S_bar >= S_south - 0.02:
         return None
 
-    C0 = C0_for_shape(c0, A_c0)
+    C0 = C0_dimensional(c0, A_c0)
     rhs = lambda S, y: meridian_rhs(S, y, C0, sigma_bar, P_bar)
     y_n = north_pole_state(U0, C0=C0, sigma_bar=sigma_bar, P_bar=P_bar)
     A1 = float(A_target)
@@ -1524,12 +1391,12 @@ def _integrate_two_legs(
     ivp_n = _integrate_leg(
         rhs, (S_POLE, S_bar), y_n,
         max_step=max_step, rtol=rtol, atol=atol, dense=dense,
-        enforce_fig16=enforce_fig16,
+        enforce_branch_filters=enforce_branch_filters,
     )
     ivp_s = _integrate_leg(
         rhs, (S_south, S_bar), y_s,
         max_step=max_step, rtol=rtol, atol=atol, dense=dense,
-        enforce_fig16=enforce_fig16,
+        enforce_branch_filters=enforce_branch_filters,
     )
     if ivp_n is None or ivp_s is None:
         return None
@@ -1541,8 +1408,8 @@ def _integrate_two_legs(
             return None
         yn = ivp_n.sol(sn)
         ys = ivp_s.sol(ss)
-        if enforce_fig16 and not (
-            _fig16_leg_psi_valid(yn[2], n=1) and _fig16_leg_psi_valid(ys[2], n=1)
+        if enforce_branch_filters and not (
+            _leg_psi_valid(yn[2], n=1) and _leg_psi_valid(ys[2], n=1)
         ):
             return None
         s_full, y_full = _stitch_meridian_profile(sn, ss, yn, ys)
@@ -1550,22 +1417,14 @@ def _integrate_two_legs(
 
     return ivp_n.y[:, -1], ivp_s.y[:, -1]
 
-def _north_state_at_S1(
-    U0: float,
-    S1: float,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    *,
-    rtol: float = 1e-9,
-    atol: float = 1e-11,
-    max_step: float = STAGE2_MAX_STEP,
+def _north_state_at_S1(U0: float, S1: float, sigma_bar: float, P_bar: float, c0: float, *,
+    rtol: float = 1e-9, atol: float = 1e-11, max_step: float = TWO_LEG_MAX_STEP,
     A_c0: float = A_STAR,
 ) -> Optional[np.ndarray]:
     """Integrate north pole → ``S₁``; return endpoint state (for ``A(S₁)``, ``V(S₁)``)."""
     if S1 <= S_POLE + 1e-4:
         return None
-    C0 = C0_for_shape(c0, A_c0)
+    C0 = C0_dimensional(c0, A_c0)
     rhs = lambda S, y: meridian_rhs(S, y, C0, sigma_bar, P_bar)
     ivp = solve_ivp(
         rhs, (S_POLE, S1),
@@ -1578,15 +1437,8 @@ def _north_state_at_S1(
     return ivp.y[:, -1]
 
 def _south_pole_totals_from_probe(
-    U0: float,
-    S1: float,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    *,
-    rtol: float = 1e-9,
-    atol: float = 1e-11,
-    max_step: float = STAGE2_MAX_STEP,
+    U0: float, S1: float, sigma_bar: float, P_bar: float, c0: float, *,
+    rtol: float = 1e-9, atol: float = 1e-11, max_step: float = TWO_LEG_MAX_STEP,
     A_c0: float = A_STAR,
 ) -> Optional[Tuple[float, float]]:
     """``(A(S₁), V(S₁))`` by integrating the north leg to arclength ``S₁``."""
@@ -1597,24 +1449,11 @@ def _south_pole_totals_from_probe(
         return None
     return float(yf[5]), float(yf[6])
 
-def _integrate_two_legs_stage2(
-    U0: float,
-    U1: float,
-    S1: float,
-    S_bar: float,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    *,
-    dense: bool = False,
-    n: int = 200,
-    rtol: float = 1e-9,
-    atol: float = 1e-11,
-    max_step: float = STAGE2_MAX_STEP,
-    enforce_fig16: bool = True,
-    A1_hint: Optional[float] = None,
-    V1_hint: Optional[float] = None,
-    A_c0: float = A_STAR,
+def _integrate_two_legs_close(
+    U0: float, U1: float, S1: float, S_bar: float, sigma_bar: float, P_bar: float, c0: float, *,
+    dense: bool = False, n: int = 200, rtol: float = 1e-9, atol: float = 1e-11,
+    max_step: float = TWO_LEG_MAX_STEP, enforce_branch_filters: bool = True,
+    A1_hint: Optional[float] = None, V1_hint: Optional[float] = None, A_c0: float = A_STAR,
 ):
     """Stage-2 two-leg shoot (Appendix B): north ``S₀→S̄``, south ``S₁→S̄``.
 
@@ -1622,7 +1461,7 @@ def _integrate_two_legs_stage2(
     pole, so the south leg starts at ``S₁ − S_POLE``.  Totals ``A, V`` are taken
     from the north leg at that same arclength.
 
-    When ``enforce_fig16=False``, integrate without ψ-window discard so failed
+    When ``enforce_branch_filters=False``, integrate without ψ-window discard so failed
     boundary conditions can still be plotted.
     """
     S_south = S1 - S_POLE
@@ -1645,7 +1484,7 @@ def _integrate_two_legs_stage2(
             return None
         A1, V1 = totals
 
-    C0 = C0_for_shape(c0, A_c0)
+    C0 = C0_dimensional(c0, A_c0)
     rhs = lambda S, y: meridian_rhs(S, y, C0, sigma_bar, P_bar)
     y_n = north_pole_state(U0, C0=C0, sigma_bar=sigma_bar, P_bar=P_bar)
     y_s = south_pole_state_totals(
@@ -1654,12 +1493,12 @@ def _integrate_two_legs_stage2(
     ivp_n = _integrate_leg(
         rhs, (S_POLE, S_bar), y_n,
         max_step=max_step, rtol=rtol, atol=atol, dense=False,
-        enforce_fig16=enforce_fig16,
+        enforce_branch_filters=enforce_branch_filters,
     )
     ivp_s = _integrate_leg(
         rhs, (S_south, S_bar), y_s,
         max_step=max_step, rtol=rtol, atol=atol, dense=dense,
-        enforce_fig16=enforce_fig16,
+        enforce_branch_filters=enforce_branch_filters,
     )
     if ivp_n is None or ivp_s is None:
         return None
@@ -1670,14 +1509,14 @@ def _integrate_two_legs_stage2(
         ivp_n_dense = _integrate_leg(
             rhs, (S_POLE, S_bar), y_n,
             max_step=max_step, rtol=rtol, atol=atol, dense=True,
-            enforce_fig16=enforce_fig16,
+            enforce_branch_filters=enforce_branch_filters,
         )
         if ivp_n_dense is None or ivp_s.sol is None:
             return None
         yn_d = ivp_n_dense.sol(sn)
         ys = ivp_s.sol(ss)
-        if enforce_fig16 and not (
-            _fig16_leg_psi_valid(yn_d[2], n=1) and _fig16_leg_psi_valid(ys[2], n=1)
+        if enforce_branch_filters and not (
+            _leg_psi_valid(yn_d[2], n=1) and _leg_psi_valid(ys[2], n=1)
         ):
             return None
         s_full, y_full = _stitch_meridian_profile(sn, ss, yn_d, ys)
@@ -1686,29 +1525,16 @@ def _integrate_two_legs_stage2(
     return ivp_n.y[:, -1], ivp_s.y[:, -1]
 
 def _integrate_two_legs_totals(
-    U0: float,
-    U1: float,
-    S1: float,
-    S_bar: float,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    *,
-    dense: bool = False,
-    n: int = 200,
-    rtol: float = 1e-7,
-    atol: float = 1e-9,
-    max_step: float = STAGE2_MAX_STEP,
-    enforce_fig16: bool = True,
-    A1_hint: Optional[float] = None,
-    V1_hint: Optional[float] = None,
-    A_c0: float = A_STAR,
+    U0: float, U1: float, S1: float, S_bar: float, sigma_bar: float, P_bar: float, c0: float, *,
+    dense: bool = False, n: int = 200, rtol: float = 1e-7, atol: float = 1e-9,
+    max_step: float = TWO_LEG_MAX_STEP, enforce_branch_filters: bool = True,
+    A1_hint: Optional[float] = None, V1_hint: Optional[float] = None, A_c0: float = A_STAR,
 ):
     """Alias kept for callers; stage-2 path uses the probe + short-north integrator."""
-    return _integrate_two_legs_stage2(
+    return _integrate_two_legs_close(
         U0, U1, S1, S_bar, sigma_bar, P_bar, c0,
         dense=dense, n=n, rtol=rtol, atol=atol, max_step=max_step,
-        enforce_fig16=enforce_fig16, A1_hint=A1_hint, V1_hint=V1_hint, A_c0=A_c0,
+        enforce_branch_filters=enforce_branch_filters, A1_hint=A1_hint, V1_hint=V1_hint, A_c0=A_c0,
     )
 
 def _leg_psi_diagnostics(psi: np.ndarray) -> Dict[str, float]:
@@ -1718,20 +1544,12 @@ def _leg_psi_diagnostics(psi: np.ndarray) -> Dict[str, float]:
     return {
         "psi_min": float(np.min(psi)),
         "psi_max": float(np.max(psi)),
-        "fig16_ok": float(_fig16_leg_psi_valid(psi, n=1)),
+        "fig16_ok": float(_leg_psi_valid(psi, n=1)),
     }
 
 def _integrate_north_leg_profile(
-    U0: float,
-    S_end: float,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    *,
-    n: int = 200,
-    rtol: float = 1e-8,
-    atol: float = 1e-10,
-    max_step: float = STAGE2_MAX_STEP,
+    U0: float, S_end: float, sigma_bar: float, P_bar: float, c0: float, *,
+    n: int = 200, rtol: float = 1e-8, atol: float = 1e-10, max_step: float = TWO_LEG_MAX_STEP,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """Single north-leg profile ``S₀→S_end`` (fallback when two-leg fails)."""
     if S_end <= S_POLE + 0.02:
@@ -1748,17 +1566,10 @@ def _integrate_north_leg_profile(
     s = np.linspace(S_POLE, S_end, n)
     return s, ivp.sol(s)
 
-def _stage2_closure_residual(
-    x: np.ndarray,
-    *,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    junction_frac: float = JUNCTION_FRAC,
-    rtol: float = 1e-9,
-    atol: float = 1e-11,
-    A_c0: float = A_STAR,
-    enforce_fig16: bool = False,
+def _two_leg_closure_residual(x: np.ndarray, *,
+    sigma_bar: float, P_bar: float, c0: float, junction_frac: float = JUNCTION_FRAC,
+    rtol: float = 1e-9, atol: float = 1e-11, A_c0: float = A_STAR,
+    enforce_branch_filters: bool = False,
 ) -> np.ndarray:
     """Appendix B stage 2: match ``ψ, U, X`` at ``S̄``; ``γ`` via conserved ``H``.
 
@@ -1770,30 +1581,22 @@ def _stage2_closure_residual(
     S_bar = junction_frac * S1
     out = _integrate_two_legs_totals(
         U0, U1, S1, S_bar, sigma_bar, P_bar, c0,
-        rtol=rtol, atol=atol, A_c0=A_c0, enforce_fig16=enforce_fig16,
+        rtol=rtol, atol=atol, A_c0=A_c0, enforce_branch_filters=enforce_branch_filters,
     )
     if out is None:
         return np.full(3, 1e3)
     yn, ys = out
     return _junction_closure_residual(yn, ys)
 
-def _stage2_closure_residual_safe(
-    x: np.ndarray,
-    *,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    junction_frac: float = JUNCTION_FRAC,
-    timeout: float = STAGE2_RESIDUAL_TIMEOUT,
-    rtol: float = 1e-9,
-    atol: float = 1e-11,
-    A_c0: float = A_STAR,
-    enforce_fig16: bool = False,
+def _two_leg_closure_residual_safe(x: np.ndarray, *,
+    sigma_bar: float, P_bar: float, c0: float, junction_frac: float = JUNCTION_FRAC,
+    timeout: float = TWO_LEG_RESIDUAL_TIMEOUT, rtol: float = 1e-9, atol: float = 1e-11,
+    A_c0: float = A_STAR, enforce_branch_filters: bool = False,
 ) -> np.ndarray:
-    """Like :func:`_stage2_closure_residual` but skips pathological ``U₁`` trials."""
+    """Like :func:`_two_leg_closure_residual` but skips pathological ``U₁`` trials."""
     out, timed_out = _call_with_timeout(
         timeout,
-        _stage2_closure_residual,
+        _two_leg_closure_residual,
         x,
         sigma_bar=sigma_bar,
         P_bar=P_bar,
@@ -1802,21 +1605,19 @@ def _stage2_closure_residual_safe(
         rtol=rtol,
         atol=atol,
         A_c0=A_c0,
-        enforce_fig16=enforce_fig16,
+        enforce_branch_filters=enforce_branch_filters,
     )
     if timed_out or out is None:
         return np.full(3, 1e3)
     return out
 
-def _stage2_local_bounds(
-    U0_seed: float,
-    U1_seed: float,
-    S1_seed: float,
+def _two_leg_local_bounds(
+    U0_seed: float, U1_seed: float, S1_seed: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Tight ``(U₀, U₁, S₁)`` box around the stage-1 root."""
-    u0_half = max(STAGE2_U0_ABS, STAGE2_U0_REL * abs(U0_seed))
-    u1_half = max(STAGE2_U1_ABS, STAGE2_U1_REL * max(abs(U1_seed), abs(U0_seed), 0.05))
-    s1_rel = STAGE2_S1_REL_LONG if S1_seed > 8.0 else STAGE2_S1_REL
+    u0_half = max(TWO_LEG_U0_ABS, TWO_LEG_U0_REL * abs(U0_seed))
+    u1_half = max(TWO_LEG_U1_ABS, TWO_LEG_U1_REL * max(abs(U1_seed), abs(U0_seed), 0.05))
+    s1_rel = TWO_LEG_S1_REL_LONG if S1_seed > 8.0 else TWO_LEG_S1_REL
     lb = np.array([
         U0_seed - u0_half,
         U1_seed - u1_half,
@@ -1827,8 +1628,8 @@ def _stage2_local_bounds(
         U1_seed + u1_half,
         (1.0 + s1_rel) * S1_seed,
     ], dtype=float)
-    lb = np.maximum(lb, np.array(STAGE2_BOUNDS[0], dtype=float))
-    ub = np.minimum(ub, np.array(STAGE2_BOUNDS[1], dtype=float))
+    lb = np.maximum(lb, np.array(TWO_LEG_CLOSE_BOUNDS[0], dtype=float))
+    ub = np.minimum(ub, np.array(TWO_LEG_CLOSE_BOUNDS[1], dtype=float))
     for i in range(3):
         if ub[i] <= lb[i]:
             mid = 0.5 * (float(lb[i]) + float(ub[i]))
@@ -1836,19 +1637,9 @@ def _stage2_local_bounds(
             lb[i], ub[i] = mid - eps, mid + eps
     return lb, ub
 
-def shoot_appendix_b_stage2(
-    U0: float,
-    U1: float,
-    S1: float,
-    *,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    branch: str = "appendix_b",
-    n: int = 200,
-    verbose: bool = False,
-    junction_frac: Optional[float] = None,
-    A_c0: float = A_STAR,
+def shoot_two_leg_free_v(U0: float, U1: float, S1: float, *,
+    sigma_bar: float, P_bar: float, c0: float, branch: str = "appendix_b", n: int = 200,
+    verbose: bool = False, junction_frac: Optional[float] = None, A_c0: float = A_STAR,
     max_nfev: int = 80,
 ) -> MeridianSolution:
     """Appendix B stage 2: fixed ``(Σ̄, P̄, C₀)``; shoot ``(U₀, U₁, S₁)`` for junction closure.
@@ -1859,31 +1650,31 @@ def shoot_appendix_b_stage2(
     ``junction_frac`` sets ``S̄ = junction_frac · S₁`` (default :data:`JUNCTION_FRAC`).
     """
     j_frac = JUNCTION_FRAC if junction_frac is None else float(junction_frac)
-    lb, ub = _stage2_local_bounds(U0, U1, S1)
+    lb, ub = _two_leg_local_bounds(U0, U1, S1)
     x0 = np.clip(np.array([float(U0), float(U1), float(S1)], dtype=float), lb, ub)
-    r0n = float(np.linalg.norm(_stage2_closure_residual_safe(
+    r0n = float(np.linalg.norm(_two_leg_closure_residual_safe(
         x0, sigma_bar=sigma_bar, P_bar=P_bar, c0=c0, junction_frac=j_frac, A_c0=A_c0,
     )))
     if verbose:
         print(
-            f"  stage2 seed: U₀={x0[0]:.4f} U₁={x0[1]:.4f} S₁={x0[2]:.3f}  |res|₀={r0n:.3e}"
+            f"  closed seed: U₀={x0[0]:.4f} U₁={x0[1]:.4f} S₁={x0[2]:.3f}  |res|₀={r0n:.3e}"
         )
         print(
-            f"  stage2 box:  U₀∈[{lb[0]:.3f},{ub[0]:.3f}]  "
+            f"  closed box:  U₀∈[{lb[0]:.3f},{ub[0]:.3f}]  "
             f"U₁∈[{lb[1]:.3f},{ub[1]:.3f}]  "
             f"S₁∈[{lb[2]:.3f},{ub[2]:.3f}]"
         )
     if r0n >= 900.0:
         msg = "integration failed at seed"
         if verbose:
-            print(f"  stage2 {msg}")
+            print(f"  closed {msg}")
         return MeridianSolution(
             0.0, c0, U0, U1, sigma_bar, P_bar, np.array([]), np.zeros((7, 0)),
             branch, False, msg, {}, S1, j_frac * S1,
         )
 
     opt = least_squares(
-        lambda x: _stage2_closure_residual_safe(
+        lambda x: _two_leg_closure_residual_safe(
             x, sigma_bar=sigma_bar, P_bar=P_bar, c0=c0, junction_frac=j_frac, A_c0=A_c0,
         ),
         x0,
@@ -1899,7 +1690,7 @@ def shoot_appendix_b_stage2(
     out = _integrate_two_legs_totals(
         U0f, U1f, S1f, S_bar, sigma_bar, P_bar, c0,
         dense=True, n=n, rtol=1e-8, atol=1e-10, A_c0=A_c0,
-        enforce_fig16=False,
+        enforce_branch_filters=False,
     )
     if out is None:
         return MeridianSolution(
@@ -1915,7 +1706,7 @@ def shoot_appendix_b_stage2(
     ok = ok and abs(constraints["psi_match"]) < 0.02 and abs(constraints["X_match"]) < 0.02
     if verbose:
         print(
-            f"  stage2 U0={U0f:.3f} U1={U1f:.3f} S1={S1f:.3f} v̄={v_hat:.4f} "
+            f"  closed U0={U0f:.3f} U1={U1f:.3f} S1={S1f:.3f} v̄={v_hat:.4f} "
             f"|res|={np.linalg.norm(opt_fun):.2e} ok={ok}"
         )
     return MeridianSolution(
@@ -1924,23 +1715,15 @@ def shoot_appendix_b_stage2(
         constraints, S1f, S_bar,
     )
 
-def _two_leg_residual(
-    x: np.ndarray,
-    v: float,
-    c0: float,
-    rtol: float,
-    atol: float,
-    *,
-    A_target: float = A_STAR,
-    A_c0: float = A_STAR,
-    enforce_fig16: bool = True,
+def _two_leg_residual(x: np.ndarray, v: float, c0: float, rtol: float, atol: float, *,
+    A_target: float = A_STAR, A_c0: float = A_STAR, enforce_branch_filters: bool = True,
 ) -> np.ndarray:
     """Match ψ, U, X, A, V at interior junction S̄ (γ via conserved H)."""
     U0, U1, S1, sigma_bar, P_bar = x
     S_bar = JUNCTION_FRAC * S1
     out = _integrate_two_legs(
         U0, U1, S1, S_bar, sigma_bar, P_bar, c0, v,
-        rtol=rtol, atol=atol, enforce_fig16=enforce_fig16, A_c0=A_c0,
+        rtol=rtol, atol=atol, enforce_branch_filters=enforce_branch_filters, A_c0=A_c0,
         A_target=A_target,
     )
     if out is None:
@@ -1957,33 +1740,19 @@ def _two_leg_residual(
         (yn[6] - ys[6]) / max(abs(v_tgt), 1e-12),
     ])
 
-def _two_leg_residual_safe(
-    x: np.ndarray,
-    v: float,
-    c0: float,
-    rtol: float,
-    atol: float,
-    *,
-    A_target: float = A_STAR,
-    A_c0: float = A_STAR,
-    timeout: float = STAGE3_RESIDUAL_TIMEOUT,
-    enforce_fig16: bool = True,
+def _two_leg_residual_safe(x: np.ndarray, v: float, c0: float, rtol: float, atol: float, *,
+    A_target: float = A_STAR, A_c0: float = A_STAR, timeout: float = AV_MATCH_TIMEOUT,
+    enforce_branch_filters: bool = True,
 ) -> np.ndarray:
     out, timed_out = _call_with_timeout(
         timeout, _two_leg_residual, x, v, c0, rtol, atol,
-        A_target=A_target, A_c0=A_c0, enforce_fig16=enforce_fig16,
+        A_target=A_target, A_c0=A_c0, enforce_branch_filters=enforce_branch_filters,
     )
     if timed_out or out is None:
         return np.full(5, 1e3)
     return out
 
-def _constraints_from_junction(
-    yn: np.ndarray,
-    ys: np.ndarray,
-    v: float,
-    S1: float,
-    S_bar: float,
-    *,
+def _constraints_from_junction(yn: np.ndarray, ys: np.ndarray, v: float, S1: float, S_bar: float, *,
     A_target: float = A_STAR,
 ) -> Dict[str, float]:
     v_tgt = V_at_area(v, A_target)
@@ -2000,26 +1769,12 @@ def _constraints_from_junction(
         "S_bar": float(S_bar),
     }
 
-def integrate_appendix_b_stage2(
-    U0: float,
-    U1: float,
-    S1: float,
-    *,
-    sigma_bar: float,
-    P_bar: float,
-    c0: float,
-    branch: str = "appendix_b_seed",
-    n: int = 200,
-    junction_frac: Optional[float] = None,
-    S_bar: Optional[float] = None,
-    north_frac: Optional[float] = None,
-    enforce_fig16: bool = False,
-    A1_hint: Optional[float] = None,
-    V1_hint: Optional[float] = None,
-    rtol: float = 1e-8,
-    atol: float = 1e-10,
-    max_step: Optional[float] = None,
-    A_c0: float = A_STAR,
+def integrate_two_leg(U0: float, U1: float, S1: float, *,
+    sigma_bar: float, P_bar: float, c0: float, branch: str = "appendix_b_seed", n: int = 200,
+    junction_frac: Optional[float] = None, S_bar: Optional[float] = None,
+    north_frac: Optional[float] = None, enforce_branch_filters: bool = False,
+    A1_hint: Optional[float] = None, V1_hint: Optional[float] = None, rtol: float = 1e-8,
+    atol: float = 1e-10, max_step: Optional[float] = None, A_c0: float = A_STAR,
 ) -> MeridianSolution:
     """Two-leg meridian at stage-1 ``(U₀, U₁, S₁*)`` — no parameter shoot.
 
@@ -2029,7 +1784,7 @@ def integrate_appendix_b_stage2(
     * ``S_bar`` — explicit interior arclength
     * ``north_frac`` — north leg ``= S_POLE + north_frac · (S₁ − 2 S_POLE)``
 
-    By default ``enforce_fig16=False`` so a profile is returned even when ψ loops
+    By default ``enforce_branch_filters=False`` so a profile is returned even when ψ loops
     or junction BCs fail (for diagnostic plots).  Junction mismatches and Fig.~16
     leg flags are stored in ``constraints``.
     """
@@ -2044,12 +1799,12 @@ def integrate_appendix_b_stage2(
             branch, False, str(exc), {}, S1f, float("nan"),
         )
     north_len, south_len = _two_leg_lengths(S1f, s_bar)
-    step = STAGE2_MAX_STEP if max_step is None else float(max_step)
+    step = TWO_LEG_MAX_STEP if max_step is None else float(max_step)
 
     out = _integrate_two_legs_totals(
         U0f, U1f, S1f, s_bar, sigma_bar, P_bar, c0,
         dense=True, n=n, rtol=rtol, atol=atol, max_step=step,
-        enforce_fig16=enforce_fig16,
+        enforce_branch_filters=enforce_branch_filters,
         A1_hint=A1_hint, V1_hint=V1_hint, A_c0=A_c0,
     )
     partial = False
@@ -2107,7 +1862,7 @@ def integrate_appendix_b_stage2(
         msg, constraints, S1f, s_bar,
     )
 
-def stage2_area(sol: MeridianSolution) -> float:
+def meridian_area(sol: MeridianSolution) -> float:
     """Total area from an Appendix B stage-2 solution (free ``A``, not necessarily ``4π``)."""
     a = sol.constraints.get("A_end")
     if a is not None and np.isfinite(a) and a > 0.0:
@@ -2117,12 +1872,7 @@ def stage2_area(sol: MeridianSolution) -> float:
     return float("nan")
 
 def rescale_shoot_params_by_length(
-    U0: float,
-    U1: float,
-    S1: float,
-    sigma_bar: float,
-    P_bar: float,
-    scale: float,
+    U0: float, U1: float, S1: float, sigma_bar: float, P_bar: float, scale: float,
 ) -> Tuple[float, float, float, float, float]:
     """Uniform meridian length scale ``s`` (thin-neck similarity).
 
@@ -2141,27 +1891,24 @@ def rescale_shoot_params_by_length(
     sig_n = float(sigma_bar) * r_u ** 2
     return U0n, U1n, S1n, sig_n, Pn
 
-def rescale_pear_params_to_landmark(
-    stage2: MeridianSolution,
-    *,
-    A_target: float,
-    S1_reference: Optional[float] = None,
+def rescale_pear_params_to_landmark(closed: MeridianSolution, *,
+    A_target: float, S1_reference: Optional[float] = None,
 ) -> Dict[str, float]:
     """Rescale stage-2 shoot parameters to target area ``A_target``.
 
     Uniform similarity with ``s = √(A_target / A_stage2)`` (not ``S₁`` ratio).
     Returns rescaled ``(U₀,U₁,S₁,Σ̄,P̄)`` and diagnostics including implied ``S₁``.
     """
-    A_src = stage2_area(stage2)
+    A_src = meridian_area(closed)
     if not np.isfinite(A_target) or A_target <= 0.0:
         raise ValueError("rescale_pear_params_to_landmark needs positive finite A_target")
     if not np.isfinite(A_src) or A_src <= 0.0:
         raise ValueError("rescale_pear_params_to_landmark needs positive finite stage-2 area")
     scale = float(np.sqrt(A_target / A_src))
     U0, U1, S1, sig, P = rescale_shoot_params_by_length(
-        stage2.U0, stage2.U1, stage2.S1, stage2.sigma_bar, stage2.P_bar, scale,
+        closed.U0, closed.U1, closed.S1, closed.sigma_bar, closed.P_bar, scale,
     )
-    S1_src = float(stage2.S1)
+    S1_src = float(closed.S1)
     out: Dict[str, float] = {
         "U0": U0, "U1": U1, "S1": S1,
         "sigma_bar": sig, "P_bar": P,
@@ -2176,6 +1923,9 @@ def rescale_pear_params_to_landmark(
         out["S1_reference"] = float(S1_reference)
     return out
 
+
+# --- Landmark rescale & (A,V) match / (c₀, v̄) continue -------------------------
+
 def C0_for_length_scale(C0: float, scale: float) -> float:
     """Dimensional ``C₀`` under meridian length scale ``s`` (``C₀ ∝ 1/s``, like ``U``).
 
@@ -2186,15 +1936,9 @@ def C0_for_length_scale(C0: float, scale: float) -> float:
         return float(C0)
     return float(C0) / s
 
-def integrate_stage25_pear_at_D(
-    stage2: MeridianSolution,
-    d_tip: MeridianSolution,
-    *,
-    C0: float = 1.0,
-    branch: str = "stage25",
-    n: int = 120,
-    junction_frac: Optional[float] = None,
-    enforce_fig16: bool = False,
+def integrate_pear_at_landmark(closed: MeridianSolution, d_tip: MeridianSolution, *,
+    C0: float = 1.0, branch: str = "pear_rescaled", n: int = 120,
+    junction_frac: Optional[float] = None, enforce_branch_filters: bool = False,
     verbose: bool = False,
 ) -> MeridianSolution:
     """Stage 2.5: rescaled pear at D area (no shoot).
@@ -2207,28 +1951,28 @@ def integrate_stage25_pear_at_D(
     full-meridian north-leg probe that otherwise stalls on rescaled pears.
     """
     t0 = time.perf_counter()
-    A_target = float(d_tip.constraints.get("A_phys", stage2_area(d_tip)))
+    A_target = float(d_tip.constraints.get("A_phys", meridian_area(d_tip)))
     if not np.isfinite(A_target) or A_target <= 0.0:
         raise ValueError("d_tip must carry A_phys in constraints")
     params = rescale_pear_params_to_landmark(
-        stage2, A_target=A_target, S1_reference=float(d_tip.S1),
+        closed, A_target=A_target, S1_reference=float(d_tip.S1),
     )
     if junction_frac is None:
-        jf = stage2.constraints.get("junction_frac")
+        jf = closed.constraints.get("junction_frac")
         if jf is not None and np.isfinite(jf):
             junction_frac = float(jf)
-        elif stage2.S1 > 0.0 and np.isfinite(stage2.S_bar):
-            junction_frac = float(stage2.S_bar / stage2.S1)
+        elif closed.S1 > 0.0 and np.isfinite(closed.S_bar):
+            junction_frac = float(closed.S_bar / closed.S1)
     scale = float(params["length_scale"])
-    A_src = stage2_area(stage2)
-    V_src = stage2.constraints.get("V_end")
-    if (V_src is None or not np.isfinite(V_src)) and stage2.y.size:
-        V_src = float(stage2.y[6, -1])
+    A_src = meridian_area(closed)
+    V_src = closed.constraints.get("V_end")
+    if (V_src is None or not np.isfinite(V_src)) and closed.y.size:
+        V_src = float(closed.y[6, -1])
     A1_hint = V1_hint = None
     if np.isfinite(A_src) and A_src > 0.0 and V_src is not None and np.isfinite(V_src):
         A1_hint = float(A_target)
         V1_hint = float(V_src * scale ** 3)
-    max_step = STAGE2_MAX_STEP * max(1.0, float(params["S1"]) / 2.5)
+    max_step = TWO_LEG_MAX_STEP * max(1.0, float(params["S1"]) / 2.5)
     C0_int = C0_for_length_scale(C0, scale)
     c0_preserved = (
         c0_reduced(C0_int, A_target)
@@ -2240,17 +1984,17 @@ def integrate_stage25_pear_at_D(
         vh = f"{V1_hint:.3f}" if V1_hint is not None else "probe"
         s1_ref = params.get("S1_reference", float("nan"))
         print(
-            f"  stage2.5 rescale: s=√(A_D/A₂)={scale:.4f}  "
+            f"  closed.5 rescale: s=√(A_D/A₂)={scale:.4f}  "
             f"A={A_src:.3f}→{A_target:.3f}  S₁={params['S1_source']:.3f}→{params['S1']:.3f}"
             f"  (D S₁={s1_ref:.3f})",
             flush=True,
         )
         print(
-            f"  stage2.5 integrate: C₀={C0_int:.4f} (={C0:g}/s)  c₀={c0_preserved:.4f}  "
+            f"  closed.5 integrate: C₀={C0_int:.4f} (={C0:g}/s)  c₀={c0_preserved:.4f}  "
             f"hints A={ah} V={vh}  max_step={max_step:.3f}",
             flush=True,
         )
-    sol = integrate_appendix_b_stage2(
+    sol = integrate_two_leg(
         params["U0"], params["U1"], params["S1"],
         sigma_bar=params["sigma_bar"],
         P_bar=params["P_bar"],
@@ -2258,7 +2002,7 @@ def integrate_stage25_pear_at_D(
         branch=branch,
         n=n,
         junction_frac=junction_frac,
-        enforce_fig16=enforce_fig16,
+        enforce_branch_filters=enforce_branch_filters,
         A1_hint=A1_hint,
         V1_hint=V1_hint,
         rtol=1e-7,
@@ -2267,7 +2011,7 @@ def integrate_stage25_pear_at_D(
         A_c0=A_target,
     )
     if verbose:
-        print(f"  stage2.5 integrate done ({time.perf_counter() - t0:.2f}s)", flush=True)
+        print(f"  closed.5 integrate done ({time.perf_counter() - t0:.2f}s)", flush=True)
     c0_D = c0_reduced(C0, A_target)
     sol = replace(
         sol,
@@ -2283,10 +2027,10 @@ def integrate_stage25_pear_at_D(
             "c0_reduced_D": c0_D,
             "C0": float(C0),
             "C0_integrate": C0_int,
-            "stage": "2.5",
+            "pipeline": "rescaled",
         },
     )
-    A_end = stage2_area(sol)
+    A_end = meridian_area(sol)
     if np.isfinite(A_end) and A_target > 0.0:
         sol.constraints["A_error_rel_D"] = float((A_end - A_target) / A_target)
     return sol
@@ -2295,7 +2039,7 @@ def _prev_at_target_area(prev: MeridianSolution, A_target: float, tol: float = 0
     """True when ``prev`` is an integrated solution at ``A_target``."""
     if len(prev.s) == 0:
         return False
-    A = stage2_area(prev)
+    A = meridian_area(prev)
     if not np.isfinite(A) or A <= 0.0:
         return False
     return abs(A - A_target) / A_target < tol
@@ -2316,11 +2060,7 @@ def _warm_start_x5(prev: MeridianSolution) -> np.ndarray:
         [prev.U0, prev.U1, prev.S1, prev.sigma_bar, prev.P_bar], dtype=float,
     )
 
-def _seed_candidates(
-    v: float,
-    c0: float,
-    prev: Optional[MeridianSolution] = None,
-    *,
+def _seed_candidates(v: float, c0: float, prev: Optional[MeridianSolution] = None, *,
     u0_seeds: Optional[List[Tuple[float, float, float]]] = None,
     fig16: Optional[List[Tuple[float, float, float]]] = None,
 ) -> List[np.ndarray]:
@@ -2346,10 +2086,7 @@ def _seed_candidates(
             uniq.append(s)
     return uniq
 
-def _av_errors_from_profile(
-    y: np.ndarray,
-    v: float,
-    *,
+def _av_errors_from_profile(y: np.ndarray, v: float, *,
     A_target: float = A_STAR,
 ) -> Tuple[float, float]:
     """Relative ``A``, ``V`` errors at the south-pole end of a stitched profile."""
@@ -2362,20 +2099,11 @@ def _av_errors_from_profile(
     v_err = (v_end - v_tgt) / max(abs(v_tgt), 1e-12)
     return float(a_err), float(v_err)
 
-def _shoot_box(
-    x0: np.ndarray,
-    *,
-    u0_window: Optional[float] = None,
-    u0_min: Optional[float] = None,
-    u1_min: Optional[float] = None,
-    u0_rel: float = 0.18,
-    u1_rel: float = 0.22,
-    s1_window: Tuple[float, float] = (0.82, 1.18),
-    sig_rel: float = 0.35,
-    p_rel: float = 0.30,
-    sig_abs: float = 0.35,
-    p_abs: float = 0.25,
-    pin_P_sigma: bool = False,
+def _shoot_box(x0: np.ndarray, *,
+    u0_window: Optional[float] = None, u0_min: Optional[float] = None,
+    u1_min: Optional[float] = None, u0_rel: float = 0.18, u1_rel: float = 0.22,
+    s1_window: Tuple[float, float] = (0.82, 1.18), sig_rel: float = 0.35, p_rel: float = 0.30,
+    sig_abs: float = 0.35, p_abs: float = 0.25, pin_P_sigma: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Bounded TRF box around a 5-vector warm start."""
     x0 = np.asarray(x0, dtype=float).reshape(5)
@@ -2414,30 +2142,14 @@ def _shoot_box(
     x_clip = np.clip(x0, lb, ub)
     return x_clip, np.array(lb, dtype=float), np.array(ub, dtype=float)
 
-def _shoot_two_leg(
-    v: float,
-    c0: float,
-    x0: np.ndarray,
-    *,
-    branch: str,
-    n: int,
-    verbose: bool,
-    A_target: float = A_STAR,
-    A_c0: Optional[float] = None,
-    u0_window: Optional[float] = None,
-    u0_min: Optional[float] = None,
-    u1_min: Optional[float] = None,
-    s1_window: Tuple[float, float] = (0.82, 1.18),
-    residual_rtol: float = 1e-9,
-    residual_atol: float = 1e-11,
-    integrate_rtol: float = 1e-9,
-    integrate_atol: float = 1e-11,
-    max_nfev: int = 120,
-    polish: bool = True,
-    polish_frac: float = 0.07,
-    residual_timeout: float = STAGE3_RESIDUAL_TIMEOUT,
-    enforce_fig16_residual: bool = False,
-    enforce_fig16_profile: bool = True,
+def _shoot_two_leg(v: float, c0: float, x0: np.ndarray, *,
+    branch: str, n: int, verbose: bool, A_target: float = A_STAR, A_c0: Optional[float] = None,
+    u0_window: Optional[float] = None, u0_min: Optional[float] = None,
+    u1_min: Optional[float] = None, s1_window: Tuple[float, float] = (0.82, 1.18),
+    residual_rtol: float = 1e-9, residual_atol: float = 1e-11, integrate_rtol: float = 1e-9,
+    integrate_atol: float = 1e-11, max_nfev: int = 120, polish: bool = True,
+    polish_frac: float = 0.07, residual_timeout: float = AV_MATCH_TIMEOUT,
+    enforce_fig16_residual: bool = False, enforce_fig16_profile: bool = True,
     pin_P_sigma: bool = False,
 ) -> MeridianSolution:
     if A_c0 is None:
@@ -2450,7 +2162,7 @@ def _shoot_two_leg(
     def residual(x: np.ndarray) -> np.ndarray:
         return _two_leg_residual_safe(
             x, v, c0, residual_rtol, residual_atol, timeout=residual_timeout,
-            A_target=A_target, A_c0=A_c0, enforce_fig16=enforce_fig16_residual,
+            A_target=A_target, A_c0=A_c0, enforce_branch_filters=enforce_fig16_residual,
         )
 
     opt = least_squares(
@@ -2478,13 +2190,13 @@ def _shoot_two_leg(
     out = _integrate_two_legs(
         U0, U1, S1, S_bar, sigma_bar, P_bar, c0, v,
         dense=True, n=n, rtol=integrate_rtol, atol=integrate_atol,
-        enforce_fig16=enforce_fig16_profile, A_c0=A_c0, A_target=A_target,
+        enforce_branch_filters=enforce_fig16_profile, A_c0=A_c0, A_target=A_target,
     )
     if out is None and enforce_fig16_profile:
         out = _integrate_two_legs(
             U0, U1, S1, S_bar, sigma_bar, P_bar, c0, v,
             dense=True, n=n, rtol=integrate_rtol, atol=integrate_atol,
-            enforce_fig16=False, A_c0=A_c0, A_target=A_target,
+            enforce_branch_filters=False, A_c0=A_c0, A_target=A_target,
         )
     if out is None:
         return MeridianSolution(
@@ -2560,11 +2272,7 @@ def _shoot_residual_norm(sol: MeridianSolution) -> float:
         + abs(c.get("V_error_rel", 1.0))
     )
 
-def _score_prolate_candidate(
-    sol: MeridianSolution,
-    *,
-    u0_min: Optional[float] = None,
-) -> float:
+def _score_prolate_candidate(sol: MeridianSolution, *, u0_min: Optional[float] = None) -> float:
     """Higher is better; −inf rejects oblate / stomatocyte side."""
     if len(sol.s) < 5:
         return float("-inf")
@@ -2585,30 +2293,14 @@ def _score_prolate_candidate(
         u_excess = float(sol.U0 - u0_min)
     return u_excess + 0.05 * zs - 2.0 * res
 
-def solve_seifert(
-    v: float,
-    c0: float = 0.0,
-    *,
-    prev: Optional[MeridianSolution] = None,
-    branch: str = "seifert",
-    n: int = 240,
-    verbose: bool = False,
-    use_u0_scan: bool = True,
-    pick: str = "first",
-    u0_seeds: Optional[List[Tuple[float, float, float]]] = None,
-    use_fig16: Optional[bool] = None,
-    fig16_guesses: Optional[List[Tuple[float, float, float]]] = None,
-    lock_branch: bool = False,
-    u0_window: Optional[float] = None,
-    A_target: float = A_STAR,
-    A_c0: Optional[float] = None,
-    polish: bool = True,
-    polish_frac: float = 0.07,
-    max_nfev: int = 120,
-    residual_rtol: float = 1e-9,
-    residual_atol: float = 1e-11,
-    integrate_rtol: float = 1e-9,
-    integrate_atol: float = 1e-11,
+def solve_seifert(v: float, c0: float = 0.0, *,
+    prev: Optional[MeridianSolution] = None, branch: str = "seifert", n: int = 240,
+    verbose: bool = False, use_u0_scan: bool = True, pick: str = "first",
+    u0_seeds: Optional[List[Tuple[float, float, float]]] = None, use_fig16: Optional[bool] = None,
+    fig16_guesses: Optional[List[Tuple[float, float, float]]] = None, lock_branch: bool = False,
+    u0_window: Optional[float] = None, A_target: float = A_STAR, A_c0: Optional[float] = None,
+    polish: bool = True, polish_frac: float = 0.07, max_nfev: int = 120, residual_rtol: float = 1e-9,
+    residual_atol: float = 1e-11, integrate_rtol: float = 1e-9, integrate_atol: float = 1e-11,
 ) -> MeridianSolution:
     """Appendix B: ``U(0)`` scan + two-leg shoot for target area and ``V = V(v, A)``.
 
@@ -2677,12 +2369,8 @@ def solve_seifert(
         branch, False, "no seed converged", {}, 0.0, 0.0,
     )
 
-def _stage3_cv_line_track(
-    v0: float,
-    c0_0: float,
-    v1: float,
-    c0_1: float,
-    n_steps: int,
+def _cv_line_track(
+    v0: float, c0_0: float, v1: float, c0_1: float, n_steps: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Straight-line samples in ``(c₀, v̄)`` from start to target (excluding start)."""
     n = int(n_steps)
@@ -2691,15 +2379,9 @@ def _stage3_cv_line_track(
     t = np.linspace(0.0, 1.0, n + 1, dtype=float)[1:]
     return c0_0 + t * (c0_1 - c0_0), v0 + t * (v1 - v0)
 
-def _stage3_pear_step_ok(
-    sol: MeridianSolution,
-    *,
-    min_v: float = 0.65,
-    warm: Optional[MeridianSolution] = None,
-    strict_pear: bool = False,
-    min_asym: float = 0.08,
-    junction_match_tol: float = 0.05,
-    s1_max_rel_jump: float = 0.035,
+def _pear_cv_step_ok(sol: MeridianSolution, *,
+    min_v: float = 0.65, warm: Optional[MeridianSolution] = None, strict_pear: bool = False,
+    min_asym: float = 0.08, junction_match_tol: float = 0.05, s1_max_rel_jump: float = 0.035,
 ) -> bool:
     """True when a continuation step stays on the pear / dumbbell branch."""
     if len(sol.s) < 5:
@@ -2726,13 +2408,8 @@ def _stage3_pear_step_ok(
             return False
     return True
 
-
-def _stage3_stomatocyte_step_ok(
-    sol: MeridianSolution,
-    *,
-    min_v: float = 0.50,
-    warm: Optional[MeridianSolution] = None,
-    junction_match_tol: float = 0.08,
+def _stomatocyte_cv_step_ok(sol: MeridianSolution, *,
+    min_v: float = 0.50, warm: Optional[MeridianSolution] = None, junction_match_tol: float = 0.08,
     s1_max_rel_jump: float = 0.08,
 ) -> bool:
     """True when a continuation step stays on a stomatocyte-like branch.
@@ -2763,7 +2440,6 @@ def _stage3_stomatocyte_step_ok(
             return False
     return True
 
-
 def pear_branch_at_E_ok(sol: MeridianSolution, *, rtol: float = 5e-3) -> bool:
     """True when ``sol`` is the asymmetric pear/dumbbell **E**, not prolate **E**."""
     if not (
@@ -2771,27 +2447,14 @@ def pear_branch_at_E_ok(sol: MeridianSolution, *, rtol: float = 5e-3) -> bool:
         and abs(float(sol.c0) - BS_C0_END) < rtol * max(BS_C0_END, 1.0)
     ):
         return False
-    return _stage3_pear_step_ok(
+    return _pear_cv_step_ok(
         sol, strict_pear=True, warm=None, min_asym=0.08,
         junction_match_tol=0.05, s1_max_rel_jump=1.0,
     )
 
-
-def _stage3_cv_shoot_step(
-    warm: MeridianSolution,
-    c_try: float,
-    v_try: float,
-    ramp_kw: Dict[str, Any],
-    *,
-    strict_pear: bool,
-    pear_min_v: float,
-    pear_min_asym: float,
-    junction_match_tol: float,
-    s1_max_rel_jump: float,
-    cv_bisect_max: int,
-    verbose: bool,
-    step_label: str,
-    family: str = "pear",
+def _cv_shoot_step(warm: MeridianSolution, c_try: float, v_try: float, ramp_kw: Dict[str, Any], *,
+    strict_pear: bool, pear_min_v: float, pear_min_asym: float, junction_match_tol: float,
+    s1_max_rel_jump: float, cv_bisect_max: int, verbose: bool, step_label: str, family: str = "pear",
 ) -> Tuple[MeridianSolution, bool]:
     """Shoot one ``(c₀,v̄)`` increment; bisect when branch checks fail."""
     c_w, v_w = float(warm.c0), float(warm.v)
@@ -2801,13 +2464,13 @@ def _stage3_cv_shoot_step(
     for k in range(int(cv_bisect_max) + 1):
         sol_try = solve_seifert(float(v_pt), float(c_pt), prev=warm, **ramp_kw)
         if family == "stomatocyte":
-            ok = _stage3_stomatocyte_step_ok(
+            ok = _stomatocyte_cv_step_ok(
                 sol_try, min_v=pear_min_v, warm=warm,
                 junction_match_tol=junction_match_tol,
                 s1_max_rel_jump=s1_max_rel_jump,
             )
         else:
-            ok = _stage3_pear_step_ok(
+            ok = _pear_cv_step_ok(
                 sol_try, min_v=pear_min_v, warm=warm, strict_pear=strict_pear,
                 min_asym=pear_min_asym, junction_match_tol=junction_match_tol,
                 s1_max_rel_jump=s1_max_rel_jump,
@@ -2827,29 +2490,13 @@ def _stage3_cv_shoot_step(
     assert sol_try is not None
     return sol_try, ok
 
-def solve_stage3_from_appendix_b(
-    warm_start: MeridianSolution,
-    v: float,
-    c0: float,
-    *,
-    A_target: Optional[float] = None,
-    branch: str = "stage3",
-    n: int = 240,
-    verbose: bool = False,
-    u0_window: Optional[float] = None,
-    refine: bool = True,
-    c0_step: float = 0.06,
-    min_cv_steps: int = 25,
-    v_step: float = 0.004,
-    pear_min_v: float = 0.65,
-    strict_pear_branch: bool = False,
-    pear_min_asym: float = 0.08,
-    junction_match_tol: float = 0.05,
-    s1_max_rel_jump: float = 0.035,
-    cv_bisect_max: int = 5,
-    polish: bool = True,
-    family: str = "pear",
-    **shoot_kw,
+def match_AV_from_seed(warm_start: MeridianSolution, v: float, c0: float, *,
+    A_target: Optional[float] = None, branch: str = "pear_matched", n: int = 240,
+    verbose: bool = False, u0_window: Optional[float] = None, refine: bool = True,
+    c0_step: float = 0.06, min_cv_steps: int = 25, v_step: float = 0.004, pear_min_v: float = 0.65,
+    strict_pear_branch: bool = False, pear_min_asym: float = 0.08, junction_match_tol: float = 0.05,
+    s1_max_rel_jump: float = 0.035, cv_bisect_max: int = 5, polish: bool = True,
+    family: str = "pear", **shoot_kw,
 ) -> MeridianSolution:
     """Match growth-track ``(A, v̄, c₀)`` at D from a stage-2.5 warm start.
 
@@ -2869,7 +2516,7 @@ def solve_stage3_from_appendix_b(
     if A_target is None:
         A_target = float(warm.constraints.get("A_target", float("nan")))
     if not np.isfinite(A_target) or A_target <= 0.0:
-        A_target = float(warm.constraints.get("A_phys", stage2_area(warm)))
+        A_target = float(warm.constraints.get("A_phys", meridian_area(warm)))
     if not np.isfinite(A_target) or A_target <= 0.0:
         R0 = area_radius(A_STAR) if abs(c0_tgt) < 1e-14 else abs(c0_tgt)
         A_target = float(A_STAR * R0 * R0)
@@ -2903,9 +2550,8 @@ def solve_stage3_from_appendix_b(
     c0_cur = float(warm.c0)
     path: List[Dict[str, Any]] = []
 
-    def _path_note(
-        phase: str, v_pt: float, c0_pt: float, *, ok: bool = True,
-        v_req: Optional[float] = None, c0_req: Optional[float] = None,
+    def _path_note(phase: str, v_pt: float, c0_pt: float, *,
+        ok: bool = True, v_req: Optional[float] = None, c0_req: Optional[float] = None,
     ) -> None:
         path.append({
             "phase": phase,
@@ -2935,7 +2581,7 @@ def solve_stage3_from_appendix_b(
             if verbose:
                 print(
                     f"  stage3: after refine  v̄={v_cur:.4f} c₀={c0_cur:.4f}  "
-                    f"A={stage2_area(warm):.3f}  ok={warm.success}",
+                    f"A={meridian_area(warm):.3f}  ok={warm.success}",
                     flush=True,
                 )
 
@@ -2943,7 +2589,7 @@ def solve_stage3_from_appendix_b(
         n_c0 = int(np.ceil(abs(c0_tgt - c0_cur) / c0_step)) if c0_step > 0 else 1
         n_v = int(np.ceil(abs(v_tgt - v_cur) / v_step)) if v_step > 0 else 1
         n_line = max(min_cv_steps, n_c0, n_v)
-        c_track, v_track = _stage3_cv_line_track(
+        c_track, v_track = _cv_line_track(
             v_cur, c0_cur, v_tgt, c0_tgt, n_line,
         )
         if verbose:
@@ -2957,7 +2603,7 @@ def solve_stage3_from_appendix_b(
             )
         t_line = time.perf_counter()
         for i, (c_try, v_try) in enumerate(zip(c_track, v_track)):
-            sol_try, ok = _stage3_cv_shoot_step(
+            sol_try, ok = _cv_shoot_step(
                 warm, float(c_try), float(v_try), ramp_kw,
                 strict_pear=strict_pear_branch,
                 pear_min_v=pear_min_v,
@@ -3011,10 +2657,10 @@ def solve_stage3_from_appendix_b(
         sol.constraints["A_target"] = A_target
         sol.constraints["A_phys"] = A_target
         _path_note("target", v_tgt, c0_tgt)
-        sol.constraints["stage3_path"] = path
-        sol.constraints["stage3_target_v"] = v_tgt
-        sol.constraints["stage3_target_c0"] = c0_tgt
-        sol.constraints["stage3_family"] = family
+        sol.constraints["match_path"] = path
+        sol.constraints["match_target_v"] = v_tgt
+        sol.constraints["match_target_c0"] = c0_tgt
+        sol.constraints["match_family"] = family
         # Stomatocyte: do not accept a high-residual final as success.
         if family == "stomatocyte":
             res = float(sol.constraints.get("residual", float("inf")))
@@ -3041,19 +2687,12 @@ def _junction_frac_from_warm(warm: MeridianSolution) -> Optional[float]:
         return float(warm.S_bar / warm.S1)
     return None
 
-def _shoot_pear_junction_from_warm(
-    warm: MeridianSolution,
-    c0: float,
-    *,
-    branch: str,
-    verbose: bool = False,
-    junction_frac: Optional[float] = None,
-    n: int = 200,
-    A_c0: float = A_STAR,
-    max_nfev: int = 80,
+def _shoot_pear_junction_from_warm(warm: MeridianSolution, c0: float, *,
+    branch: str, verbose: bool = False, junction_frac: Optional[float] = None, n: int = 200,
+    A_c0: float = A_STAR, max_nfev: int = 80,
 ) -> MeridianSolution:
     """Close the pear junction with stage-2 shooting (``U₀,U₁,S₁`` only; ``v̄`` free)."""
-    sol = shoot_appendix_b_stage2(
+    sol = shoot_two_leg_free_v(
         warm.U0, warm.U1, warm.S1,
         sigma_bar=warm.sigma_bar, P_bar=warm.P_bar, c0=float(c0),
         branch=branch, verbose=verbose,
@@ -3068,6 +2707,9 @@ def _shoot_pear_junction_from_warm(
         constraints={**warm.constraints, **sol.constraints},
     )
 
+
+# --- Energy --------------------------------------------------------------------
+
 def meridian_z_span(sol: MeridianSolution) -> float:
     """Pole-to-pole meridian height (increasing on prolate-1 as v decreases)."""
     if len(sol.s) < 5:
@@ -3075,44 +2717,8 @@ def meridian_z_span(sol: MeridianSolution) -> float:
     Z = -sol.Z
     return float(Z.max() - Z.min())
 
-def _continue_report(
-    i: int,
-    n_tot: int,
-    sol: MeridianSolution,
-    tag: str,
-    dt: float,
-) -> None:
-    c = sol.constraints
-    res = c.get("residual", float("nan"))
-    T_d = float(c.get("T_d", 1.0))
-    tau = float(c.get("t_growth", float("nan"))) / T_d if T_d > 0 else float("nan")
-    dt_step = float(c.get("dt_step", float("nan")))
-    dt_nom = float(c.get("dt_nom", float("nan")))
-    step_msg = ""
-    if np.isfinite(dt_step) and dt_step > 0 and T_d > 0:
-        d_tau = dt_step / T_d
-        step_msg = f"  Δτ={d_tau:.4g}"
-        if np.isfinite(dt_nom) and dt_nom > 0:
-            step_msg += f" (dt/dt_nom={dt_step / dt_nom:.3f})"
-    tau_msg = f"τ={tau:.4f}  " if np.isfinite(tau) else ""
-    v_ode = c.get("v_ode")
-    v_msg = f"v̄={sol.v:.4f}"
-    if v_ode is not None and abs(float(v_ode) - sol.v) > 5e-4:
-        v_msg = f"v̄={sol.v:.4f}(ode={float(v_ode):.4f})"
-    print(
-        f"  [{i + 1}/{n_tot}] {tau_msg}{v_msg}  c₀={sol.c0:.4f}  {tag}  "
-        f"U0={sol.U0:+.4f}  U1={sol.U1:+.4f}  S1={sol.S1:.3f}  "
-        f"Σ̄={sol.sigma_bar:.3f}  P̄={sol.P_bar:.3f}  "
-        f"|res|={res:.2e}{step_msg}  ({dt:.2f}s)",
-        flush=True,
-    )
-
-
-def bending_energy(
-    sol: MeridianSolution,
-    *,
-    kappa: float = 1.0,
-    C0: Optional[float] = None,
+def bending_energy(sol: MeridianSolution, *,
+    kappa: float = 1.0, C0: Optional[float] = None,
 ) -> float:
     """Spontaneous-curvature Helfrich energy ``(κ/2) ∫ (C₁ + C₂ − C₀)² dA``.
 
@@ -3139,6 +2745,8 @@ def bending_energy(
     dens = 0.5 * float(kappa) * (U + C2 - C0) ** 2 * (2.0 * np.pi * np.maximum(X, 0.0))
     return float(np.trapz(dens, s))
 
+
+# --- Persistence ---------------------------------------------------------------
 
 def _cache_path(cache_dir: Path, v: float, c0: float) -> Path:
     return cache_dir / f"v{v:.6f}_c0{c0:.6f}.json"
@@ -3233,10 +2841,7 @@ def load_solution(path: Path) -> MeridianSolution:
         S_bar=S_bar,
     )
 
-def save_trajectory(
-    cache_dir: Path,
-    traj: List[MeridianSolution],
-    *,
+def save_trajectory(cache_dir: Path, traj: List[MeridianSolution], *,
     name: str = "trajectory",
 ) -> Path:
     """Cache an ordered branch trajectory (one JSON manifest + per-frame solutions)."""
@@ -3262,31 +2867,7 @@ def load_trajectory(manifest_path: Path) -> List[MeridianSolution]:
     cache_dir = manifest_path.parent
     return [load_solution(cache_dir / fname) for fname in data["files"]]
 
-def _track_index(track: Sequence[MeridianSolution], sol: MeridianSolution) -> Optional[int]:
-    """Best-effort index of ``sol`` inside ``track`` (for landmark manifests)."""
-    for i, s in enumerate(track):
-        if s is sol:
-            return i
-    key = (
-        round(float(sol.v), 8),
-        round(float(sol.c0), 8),
-        round(float(sol.constraints.get("t_growth", float("nan"))), 8),
-    )
-    for i, s in enumerate(track):
-        sk = (
-            round(float(s.v), 8),
-            round(float(s.c0), 8),
-            round(float(s.constraints.get("t_growth", float("nan"))), 8),
-        )
-        if sk == key:
-            return i
-    return None
-
-def save_solution_list(
-    cache_dir: Path,
-    name: str,
-    sols: Sequence[MeridianSolution],
-) -> Path:
+def save_solution_list(cache_dir: Path, name: str, sols: Sequence[MeridianSolution]) -> Path:
     """Cache an ordered list of solutions under ``{name}.json`` manifest."""
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
